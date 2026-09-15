@@ -1,8 +1,12 @@
-import { createHash, randomBytes } from "node:crypto";
 import { getPool, withTransaction } from "./db.js";
 import { createPixOrder, extractPixDetails } from "./mercado-pago.js";
 import { ensurePurchaseLicense } from "./purchase-license-service.js";
-import { derivePurchaseLicenseKey, hashLicenseKey } from "./security.js";
+import {
+  derivePurchaseLicenseKey,
+  derivePurchaseLookupToken,
+  hashLicenseKey,
+  verifyPurchaseLookupToken,
+} from "./security.js";
 
 export const ALLM4_LICENSE_PRICE_CENTS = 999;
 
@@ -33,14 +37,6 @@ function amountToCents(value) {
   const [units, decimal = ""] = normalized.split(".");
   const cents = Number(units) * 100 + Number(decimal.padEnd(2, "0"));
   return Number.isSafeInteger(cents) ? cents : null;
-}
-
-function hashLookupToken(value) {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-export function generatePurchaseLookupToken() {
-  return randomBytes(32).toString("base64url");
 }
 
 export function mapMercadoPagoOrderStatus(order) {
@@ -78,14 +74,12 @@ export function inspectMercadoPagoOrder(order) {
 }
 
 export async function createPixPurchase({ payerEmail, payerFirstName = null, fetchImpl = fetch }) {
-  const lookupToken = generatePurchaseLookupToken();
-  const lookupTokenHash = hashLookupToken(lookupToken);
   const inserted = await getPool().query(
-    `INSERT INTO purchases (provider, payer_email, amount_cents, currency, status, lookup_token_hash)
-     VALUES ('mercado_pago', $1, $2, 'BRL', 'pending', $3)
+    `INSERT INTO purchases (provider, payer_email, amount_cents, currency, status)
+     VALUES ('mercado_pago', $1, $2, 'BRL', 'pending')
      RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
                currency, status, paid_at, created_at, updated_at`,
-    [payerEmail, ALLM4_LICENSE_PRICE_CENTS, lookupTokenHash],
+    [payerEmail, ALLM4_LICENSE_PRICE_CENTS],
   );
   const purchase = inserted.rows[0];
   const externalReference = `allm4_${purchase.id}`;
@@ -107,22 +101,21 @@ export async function createPixPurchase({ payerEmail, payerFirstName = null, fet
   );
   return {
     purchase: mapPurchase(updated.rows[0]),
-    lookup_token: lookupToken,
+    lookup_token: derivePurchaseLookupToken(purchase.id),
     pix: extractPixDetails(order),
   };
 }
 
 export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
   if (typeof purchaseId !== "string" || !UUID_PATTERN.test(purchaseId)) return null;
-  if (typeof lookupToken !== "string" || lookupToken.length < 32 || lookupToken.length > 256) return null;
-  const lookupTokenHash = hashLookupToken(lookupToken);
+  if (!verifyPurchaseLookupToken(purchaseId, lookupToken)) return null;
   const result = await getPool().query(
     `SELECT p.id, p.status, p.amount_cents, p.currency, p.paid_at,
             l.id AS license_id, l.license_key_hash, l.status AS license_status
      FROM purchases p
      LEFT JOIN licenses l ON l.purchase_id = p.id
-     WHERE p.id = $1 AND p.lookup_token_hash = $2`,
-    [purchaseId, lookupTokenHash],
+     WHERE p.id = $1`,
+    [purchaseId],
   );
   const row = result.rows[0];
   if (!row) return null;
