@@ -13,6 +13,8 @@ const LICENSE_BODY_LENGTH = LICENSE_GROUP_SIZE * LICENSE_GROUP_COUNT;
 const LICENSE_BODY_PATTERN = new RegExp(
   `^[A-HJ-NP-Z2-9]{${LICENSE_BODY_LENGTH}}$`,
 );
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export class SecurityConfigurationError extends Error {
   constructor(variableName) {
@@ -38,6 +40,17 @@ function hmac(scope, value) {
     .digest("hex");
 }
 
+function formatLicenseBody(bytes) {
+  let body = "";
+
+  for (let index = 0; index < LICENSE_BODY_LENGTH; index += 1) {
+    body += LICENSE_ALPHABET[bytes[index] & 31];
+  }
+
+  const groups = body.match(new RegExp(`.{${LICENSE_GROUP_SIZE}}`, "g"));
+  return `${LICENSE_PREFIX}-${groups.join("-")}`;
+}
+
 function constantTimeStringEquals(left, right) {
   const leftDigest = createHash("sha256").update(left, "utf8").digest();
   const rightDigest = createHash("sha256").update(right, "utf8").digest();
@@ -45,15 +58,23 @@ function constantTimeStringEquals(left, right) {
 }
 
 export function generateLicenseKey() {
-  const bytes = randomBytes(LICENSE_BODY_LENGTH);
-  let body = "";
+  return formatLicenseBody(randomBytes(LICENSE_BODY_LENGTH));
+}
 
-  for (let index = 0; index < bytes.length; index += 1) {
-    body += LICENSE_ALPHABET[bytes[index] & 31];
+export function derivePurchaseLicenseKey(purchaseId) {
+  const normalizedPurchaseId =
+    typeof purchaseId === "string" ? purchaseId.trim().toLowerCase() : "";
+
+  if (!UUID_PATTERN.test(normalizedPurchaseId)) {
+    throw new TypeError("Invalid purchase id");
   }
 
-  const groups = body.match(new RegExp(`.{${LICENSE_GROUP_SIZE}}`, "g"));
-  return `${LICENSE_PREFIX}-${groups.join("-")}`;
+  const secret = getRequiredSecret("LICENSE_HASH_SECRET");
+  const digest = createHmac("sha256", secret)
+    .update(`purchase-license-key:${normalizedPurchaseId}`, "utf8")
+    .digest();
+
+  return formatLicenseBody(digest);
 }
 
 export function normalizeLicenseKey(value) {
