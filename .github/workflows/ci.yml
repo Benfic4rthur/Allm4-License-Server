@@ -28,3 +28,6 @@ jobs:
 
       - name: Validate syntax
         run: npm run check
+
+      - name: Run tests
+        run: npm test

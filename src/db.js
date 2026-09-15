@@ -26,6 +26,26 @@ export function getPool() {
   return pool;
 }
 
+export async function withTransaction(callback) {
+  const client = await getPool().connect();
+
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("Database rollback failed", rollbackError);
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function checkDatabaseConnection() {
   const result = await getPool().query("SELECT NOW() AS now");
   return result.rows[0]?.now ?? null;
