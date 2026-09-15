@@ -42,11 +42,9 @@ function hmac(scope, value) {
 
 function formatLicenseBody(bytes) {
   let body = "";
-
   for (let index = 0; index < LICENSE_BODY_LENGTH; index += 1) {
     body += LICENSE_ALPHABET[bytes[index] & 31];
   }
-
   const groups = body.match(new RegExp(`.{${LICENSE_GROUP_SIZE}}`, "g"));
   return `${LICENSE_PREFIX}-${groups.join("-")}`;
 }
@@ -57,82 +55,78 @@ function constantTimeStringEquals(left, right) {
   return timingSafeEqual(leftDigest, rightDigest);
 }
 
+function normalizePurchaseId(purchaseId) {
+  const normalized = typeof purchaseId === "string" ? purchaseId.trim().toLowerCase() : "";
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError("Invalid purchase id");
+  }
+  return normalized;
+}
+
 export function generateLicenseKey() {
   return formatLicenseBody(randomBytes(LICENSE_BODY_LENGTH));
 }
 
 export function derivePurchaseLicenseKey(purchaseId) {
-  const normalizedPurchaseId =
-    typeof purchaseId === "string" ? purchaseId.trim().toLowerCase() : "";
-
-  if (!UUID_PATTERN.test(normalizedPurchaseId)) {
-    throw new TypeError("Invalid purchase id");
-  }
-
+  const normalizedPurchaseId = normalizePurchaseId(purchaseId);
   const secret = getRequiredSecret("LICENSE_HASH_SECRET");
   const digest = createHmac("sha256", secret)
     .update(`purchase-license-key:${normalizedPurchaseId}`, "utf8")
     .digest();
-
   return formatLicenseBody(digest);
 }
 
+export function derivePurchaseLookupToken(purchaseId) {
+  const normalizedPurchaseId = normalizePurchaseId(purchaseId);
+  const secret = getRequiredSecret("LICENSE_HASH_SECRET");
+  return createHmac("sha256", secret)
+    .update(`purchase-lookup-token:${normalizedPurchaseId}`, "utf8")
+    .digest("base64url");
+}
+
+export function verifyPurchaseLookupToken(purchaseId, candidate) {
+  if (typeof candidate !== "string" || !candidate.trim()) return false;
+  let expected;
+  try {
+    expected = derivePurchaseLookupToken(purchaseId);
+  } catch {
+    return false;
+  }
+  return constantTimeStringEquals(candidate.trim(), expected);
+}
+
 export function normalizeLicenseKey(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
+  if (typeof value !== "string") return null;
   const compact = value.trim().toUpperCase().replace(/[\s-]+/g, "");
-  if (!compact.startsWith(LICENSE_PREFIX)) {
-    return null;
-  }
-
+  if (!compact.startsWith(LICENSE_PREFIX)) return null;
   const body = compact.slice(LICENSE_PREFIX.length);
-  if (!LICENSE_BODY_PATTERN.test(body)) {
-    return null;
-  }
-
+  if (!LICENSE_BODY_PATTERN.test(body)) return null;
   const groups = body.match(new RegExp(`.{${LICENSE_GROUP_SIZE}}`, "g"));
   return `${LICENSE_PREFIX}-${groups.join("-")}`;
 }
 
 export function normalizeDeviceId(value) {
-  if (typeof value !== "string") {
-    return null;
-  }
-
+  if (typeof value !== "string") return null;
   const normalized = value.trim();
-  if (normalized.length < 8 || normalized.length > 256) {
-    return null;
-  }
-
-  if(/[\u0000-\u001F\u007F]/.test(normalized)) {
-    return null;
-  }
-
+  if (normalized.length < 8 || normalized.length > 256) return null;
+  if(/[\u0000-\u001F\u007F]/.test(normalized)) return null;
   return normalized;
 }
 
 export function hashLicenseKey(value) {
   const normalized = normalizeLicenseKey(value);
-  if (!normalized) {
-    throw new TypeError("Invalid license key");
-  }
+  if (!normalized) throw new TypeError("Invalid license key");
   return hmac("license", normalized);
 }
 
 export function hashDeviceId(value) {
   const normalized = normalizeDeviceId(value);
-  if (!normalized) {
-    throw new TypeError("Invalid device id");
-  }
+  if (!normalized) throw new TypeError("Invalid device id");
   return hmac("device", normalized);
 }
 
 export function hashRequestIp(value) {
-  if (typeof value !== "string" || !value.trim()) {
-    return null;
-  }
+  if (typeof value !== "string" || !value.trim()) return null;
   return hmac("ip", value.trim());
 }
 
