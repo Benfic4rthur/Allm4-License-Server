@@ -48,6 +48,29 @@ test("validates a Mercado Pago webhook HMAC signature preserving data id case", 
   );
 });
 
+test("validates a Mercado Pago webhook HMAC signature using lowercase data id compatibility", () => {
+  const dataId = "ORD01ABCDEF";
+  const xRequestId = "request-123";
+  const timestamp = "1742505638683";
+  const manifest =
+    "id:ord01abcdef;request-id:request-123;ts:1742505638683;";
+  const hash = createHmac(
+    "sha256",
+    process.env.MERCADO_PAGO_WEBHOOK_SECRET,
+  )
+    .update(manifest, "utf8")
+    .digest("hex");
+
+  assert.equal(
+    validateMercadoPagoWebhookSignature({
+      xSignature: `ts=${timestamp},v1=${hash}`,
+      xRequestId,
+      dataId,
+    }),
+    true,
+  );
+});
+
 test("rejects a Mercado Pago webhook when signed data is altered", () => {
   const timestamp = "1742505638683";
   const manifest =

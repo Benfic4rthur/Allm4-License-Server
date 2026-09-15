@@ -191,7 +191,7 @@ function parseWebhookSignature(xSignature) {
       continue;
     }
 
-    const key = part.slice(0, separatorIndex).trim();
+    const key = part.slice(0, separatorIndex).trim().toLowerCase();
     const value = part.slice(separatorIndex + 1).trim();
     if (key && value) {
       values[key] = value;
@@ -208,6 +208,17 @@ function parseWebhookSignature(xSignature) {
   };
 }
 
+function webhookSignatureMatchesManifest({ manifest, receivedHash, secret }) {
+  const expectedHash = createHmac("sha256", secret)
+    .update(manifest, "utf8")
+    .digest();
+
+  return (
+    receivedHash.length === expectedHash.length &&
+    timingSafeEqual(receivedHash, expectedHash)
+  );
+}
+
 export function validateMercadoPagoWebhookSignature({
   xSignature,
   xRequestId = null,
@@ -218,23 +229,39 @@ export function validateMercadoPagoWebhookSignature({
     return false;
   }
 
-  const manifest = buildMercadoPagoWebhookManifest({
-    dataId,
-    xRequestId,
-    timestamp: parsed.timestamp,
-  });
+  const normalizedDataId =
+    typeof dataId === "string" && dataId.trim() ? dataId.trim() : null;
+  const manifests = [
+    buildMercadoPagoWebhookManifest({
+      dataId: normalizedDataId,
+      xRequestId,
+      timestamp: parsed.timestamp,
+    }),
+  ];
 
-  if (!manifest) {
+  if (normalizedDataId) {
+    const lowercaseDataId = normalizedDataId.toLowerCase();
+    if (lowercaseDataId !== normalizedDataId) {
+      manifests.push(
+        buildMercadoPagoWebhookManifest({
+          dataId: lowercaseDataId,
+          xRequestId,
+          timestamp: parsed.timestamp,
+        }),
+      );
+    }
+  }
+
+  if (manifests.every((manifest) => !manifest)) {
     return false;
   }
 
-  const expectedHash = createHmac("sha256", getWebhookSecret())
-    .update(manifest, "utf8")
-    .digest();
+  const secret = getWebhookSecret();
   const receivedHash = Buffer.from(parsed.hash, "hex");
 
-  return (
-    receivedHash.length === expectedHash.length &&
-    timingSafeEqual(receivedHash, expectedHash)
+  return manifests.some(
+    (manifest) =>
+      manifest &&
+      webhookSignatureMatchesManifest({ manifest, receivedHash, secret }),
   );
 }
