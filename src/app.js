@@ -1,5 +1,6 @@
 import express from "express";
 import helmet from "helmet";
+import { checkDatabaseConnection } from "./db.js";
 
 const app = express();
 
@@ -20,6 +21,23 @@ app.get("/api/health", (_req, res) => {
     service: "allm4-license-server",
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get("/api/health/db", async (_req, res) => {
+  try {
+    const now = await checkDatabaseConnection();
+    res.status(200).json({
+      ok: true,
+      database: "connected",
+      databaseTime: now,
+    });
+  } catch (error) {
+    console.error("Database health check failed", error);
+    res.status(503).json({
+      ok: false,
+      database: "unavailable",
+    });
+  }
 });
 
 app.use((_req, res) => {
