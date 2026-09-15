@@ -12,7 +12,7 @@ import {
 
 process.env.MERCADO_PAGO_WEBHOOK_SECRET = "test-webhook-secret";
 
-test("builds Mercado Pago webhook manifest using documented format", () => {
+test("builds Mercado Pago webhook manifest preserving data id case", () => {
   const manifest = buildMercadoPagoWebhookManifest({
     dataId: "ORD01ABCDEF",
     xRequestId: "request-123",
@@ -21,16 +21,16 @@ test("builds Mercado Pago webhook manifest using documented format", () => {
 
   assert.equal(
     manifest,
-    "id:ord01abcdef;request-id:request-123;ts:1742505638683;",
+    "id:ORD01ABCDEF;request-id:request-123;ts:1742505638683;",
   );
 });
 
-test("validates a Mercado Pago webhook HMAC signature", () => {
+test("validates a Mercado Pago webhook HMAC signature preserving data id case", () => {
   const dataId = "ORD01ABCDEF";
   const xRequestId = "request-123";
   const timestamp = "1742505638683";
   const manifest =
-    "id:ord01abcdef;request-id:request-123;ts:1742505638683;";
+    "id:ORD01ABCDEF;request-id:request-123;ts:1742505638683;";
   const hash = createHmac(
     "sha256",
     process.env.MERCADO_PAGO_WEBHOOK_SECRET,
@@ -51,7 +51,7 @@ test("validates a Mercado Pago webhook HMAC signature", () => {
 test("rejects a Mercado Pago webhook when signed data is altered", () => {
   const timestamp = "1742505638683";
   const manifest =
-    "id:ord01abcdef;request-id:request-123;ts:1742505638683;";
+    "id:ORD01ABCDEF;request-id:request-123;ts:1742505638683;";
   const hash = createHmac(
     "sha256",
     process.env.MERCADO_PAGO_WEBHOOK_SECRET,
