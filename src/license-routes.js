@@ -7,6 +7,7 @@ import {
   revokeLicense,
   validateLicense,
 } from "./license-service.js";
+import { maybeIssueOfflineLicenseToken } from "./license-token.js";
 import {
   normalizeDeviceId,
   normalizeLicenseKey,
@@ -125,6 +126,20 @@ function requireAdmin(req, res, next) {
   }
 }
 
+function attachOfflineLicense(result, deviceId) {
+  const token = maybeIssueOfflineLicenseToken({
+    licenseId: result.license.id,
+    deviceId,
+    licenseIssuedAt: result.license.issued_at,
+  });
+
+  return {
+    ...result,
+    offline_ready: Boolean(token),
+    offline_token: token,
+  };
+}
+
 function sendError(res, error) {
   if (error instanceof LicenseServiceError) {
     const payload = {
@@ -232,7 +247,7 @@ router.post("/licenses/activate", async (req, res) => {
     const activated = await activateLicense(parsed.value);
     return res.status(200).json({
       ok: true,
-      ...activated,
+      ...attachOfflineLicense(activated, parsed.value.deviceId),
     });
   } catch (error) {
     return sendError(res, error);
@@ -253,7 +268,7 @@ router.post("/licenses/validate", async (req, res) => {
     const validated = await validateLicense(parsed.value);
     return res.status(200).json({
       ok: true,
-      ...validated,
+      ...attachOfflineLicense(validated, parsed.value.deviceId),
     });
   } catch (error) {
     return sendError(res, error);
