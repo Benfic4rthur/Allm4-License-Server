@@ -2,6 +2,7 @@ import express from "express";
 import helmet from "helmet";
 import { checkDatabaseConnection } from "./db.js";
 import licenseRouter from "./license-routes.js";
+import purchaseRouter from "./purchase-routes.js";
 
 const app = express();
 
@@ -42,6 +43,7 @@ app.get("/api/health/db", async (_req, res) => {
 });
 
 app.use("/api", licenseRouter);
+app.use("/api", purchaseRouter);
 
 app.use((_req, res) => {
   res.status(404).json({
