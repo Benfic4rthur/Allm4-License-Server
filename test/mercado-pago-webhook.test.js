@@ -93,12 +93,17 @@ test("rejects a Mercado Pago webhook when signed data is altered", () => {
   );
 });
 
-test("webhook signature diagnostics expose only short non-secret fingerprints", () => {
+test("webhook signature diagnostics expose manifests but not secrets or full hashes", () => {
   const dataId = "ORD01ABCDEF";
   const xRequestId = "request-123";
   const timestamp = "1742505638683";
   const manifest =
     "id:ORD01ABCDEF;request-id:request-123;ts:1742505638683;";
+  const lowercaseManifest =
+    "id:ord01abcdef;request-id:request-123;ts:1742505638683;";
+  const withoutRequestIdManifest = "id:ORD01ABCDEF;ts:1742505638683;";
+  const lowercaseWithoutRequestIdManifest =
+    "id:ord01abcdef;ts:1742505638683;";
   const hash = createHmac(
     "sha256",
     process.env.MERCADO_PAGO_WEBHOOK_SECRET,
@@ -114,6 +119,16 @@ test("webhook signature diagnostics expose only short non-secret fingerprints", 
   const serialized = JSON.stringify(diagnostics);
 
   assert.equal(diagnostics.signature_format_valid, true);
+  assert.equal(diagnostics.exact_manifest, manifest);
+  assert.equal(diagnostics.lowercase_manifest, lowercaseManifest);
+  assert.equal(
+    diagnostics.exact_without_request_id_manifest,
+    withoutRequestIdManifest,
+  );
+  assert.equal(
+    diagnostics.lowercase_without_request_id_manifest,
+    lowercaseWithoutRequestIdManifest,
+  );
   assert.equal(diagnostics.received_v1_prefix, hash.slice(0, 12));
   assert.equal(diagnostics.computed_exact_prefix, hash.slice(0, 12));
   assert.equal(diagnostics.secret_fingerprint.length, 12);
