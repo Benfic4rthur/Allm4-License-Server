@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  derivePurchaseLicenseKey,
   generateLicenseKey,
   hashDeviceId,
   hashLicenseKey,
@@ -23,6 +24,17 @@ test("generateLicenseKey returns canonical high-entropy format", () => {
   }
 
   assert.equal(keys.size, 100);
+});
+
+test("derivePurchaseLicenseKey is deterministic and purchase-specific", () => {
+  const purchaseId = "123e4567-e89b-42d3-a456-426614174000";
+  const anotherPurchaseId = "123e4567-e89b-42d3-a456-426614174001";
+  const key = derivePurchaseLicenseKey(purchaseId);
+
+  assert.match(key, /^ALLM4(?:-[A-HJ-NP-Z2-9]{4}){7}$/);
+  assert.equal(derivePurchaseLicenseKey(purchaseId.toUpperCase()), key);
+  assert.notEqual(derivePurchaseLicenseKey(anotherPurchaseId), key);
+  assert.throws(() => derivePurchaseLicenseKey("not-a-purchase-id"), TypeError);
 });
 
 test("normalizeLicenseKey accepts lowercase and separator variations", () => {
