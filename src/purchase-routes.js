@@ -79,14 +79,18 @@ router.get("/purchases/:purchaseId", async (req, res) => {
   try {
     const lookupToken =
       typeof req.query.lookup_token === "string" ? req.query.lookup_token.trim() : "";
-    const purchase = await getPurchaseStatusForClient({
+    const result = await getPurchaseStatusForClient({
       purchaseId: req.params.purchaseId,
       lookupToken,
     });
-    if (!purchase) {
+    if (!result.ok) {
+      console.warn("[Purchase API] purchase status lookup rejected", {
+        purchase_id: req.params.purchaseId,
+        reason: result.reason,
+      });
       return res.status(404).json({ ok: false, error: "purchase_not_found" });
     }
-    return res.status(200).json({ ok: true, purchase });
+    return res.status(200).json({ ok: true, purchase: result.purchase });
   } catch (error) {
     return sendError(res, error);
   }
