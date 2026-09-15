@@ -1,6 +1,7 @@
 import express from "express";
 import {
   getMercadoPagoOrder,
+  getMercadoPagoWebhookSignatureDiagnostics,
   MercadoPagoApiError,
   validateMercadoPagoWebhookSignature,
 } from "./mercado-pago.js";
@@ -69,10 +70,14 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
     });
 
     if (!signatureValid) {
-      console.warn("[Mercado Pago webhook] invalid signature", {
-        request_id: xRequestId,
-        order_id: dataId,
-      });
+      console.warn(
+        "[Mercado Pago webhook] invalid signature",
+        getMercadoPagoWebhookSignatureDiagnostics({
+          xSignature,
+          xRequestId,
+          dataId,
+        }),
+      );
       return res.status(401).json({
         ok: false,
         error: "invalid_signature",
