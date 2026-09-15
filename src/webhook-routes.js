@@ -159,6 +159,8 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
         order_id: dataId,
         updated: synchronized.updated,
         purchase_status: synchronized.purchase?.status ?? null,
+        license_issued: synchronized.license_issued ?? false,
+        license_id: synchronized.license?.id ?? null,
         verification: sandboxProviderFallback
           ? "sandbox_provider_lookup"
           : "webhook_hmac",
@@ -170,6 +172,7 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
       received: true,
       synchronized: !synchronized.ignored,
       updated: synchronized.updated,
+      license_issued: synchronized.license_issued ?? false,
     });
   } catch (error) {
     return sendError(res, error);
