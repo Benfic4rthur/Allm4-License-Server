@@ -19,6 +19,21 @@ function getSingleString(value) {
   return normalized || null;
 }
 
+export function isMercadoPagoSandboxOrderNotification({
+  dataId,
+  bodyDataId,
+  liveMode,
+  type,
+}) {
+  return (
+    liveMode === false &&
+    type === "order" &&
+    typeof dataId === "string" &&
+    /^ORDTST[A-Z0-9]+$/.test(dataId) &&
+    bodyDataId === dataId
+  );
+}
+
 function sendError(res, error) {
   if (error instanceof SecurityConfigurationError) {
     console.error("[Mercado Pago webhook] required server secret is not configured", {
@@ -54,6 +69,8 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
   const xRequestId = getSingleString(req.get("x-request-id"));
   const dataId = getSingleString(req.query["data.id"]);
   const type = getSingleString(req.query.type) ?? getSingleString(req.body?.type);
+  const bodyDataId = getSingleString(req.body?.data?.id);
+  const liveMode = req.body?.live_mode;
 
   if (!dataId) {
     return res.status(400).json({
@@ -68,6 +85,14 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
       xRequestId,
       dataId,
     });
+    const sandboxProviderFallback =
+      !signatureValid &&
+      isMercadoPagoSandboxOrderNotification({
+        dataId,
+        bodyDataId,
+        liveMode,
+        type,
+      });
 
     if (!signatureValid) {
       console.warn(
@@ -78,10 +103,21 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
           dataId,
         }),
       );
-      return res.status(401).json({
-        ok: false,
-        error: "invalid_signature",
-      });
+
+      if (!sandboxProviderFallback) {
+        return res.status(401).json({
+          ok: false,
+          error: "invalid_signature",
+        });
+      }
+
+      console.warn(
+        "[Mercado Pago webhook] sandbox signature mismatch, requiring provider verification",
+        {
+          request_id: xRequestId,
+          order_id: dataId,
+        },
+      );
     }
 
     if (type && type !== "order") {
@@ -123,6 +159,9 @@ router.post("/webhooks/mercado-pago", async (req, res) => {
         order_id: dataId,
         updated: synchronized.updated,
         purchase_status: synchronized.purchase?.status ?? null,
+        verification: sandboxProviderFallback
+          ? "sandbox_provider_lookup"
+          : "webhook_hmac",
       });
     }
 
