@@ -1,4 +1,8 @@
-import { randomUUID } from "node:crypto";
+import {
+  createHmac,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import { SecurityConfigurationError } from "./security.js";
 
 const MERCADO_PAGO_API_BASE_URL = "https://api.mercadopago.com";
@@ -16,6 +20,14 @@ function getAccessToken() {
   const value = process.env.MERCADO_PAGO_ACCESS_TOKEN?.trim();
   if (!value) {
     throw new SecurityConfigurationError("MERCADO_PAGO_ACCESS_TOKEN");
+  }
+  return value;
+}
+
+function getWebhookSecret() {
+  const value = process.env.MERCADO_PAGO_WEBHOOK_SECRET?.trim();
+  if (!value) {
+    throw new SecurityConfigurationError("MERCADO_PAGO_WEBHOOK_SECRET");
   }
   return value;
 }
@@ -145,4 +157,84 @@ export function extractPixDetails(order) {
     qr_code_base64: paymentMethod?.qr_code_base64 ?? null,
     ticket_url: paymentMethod?.ticket_url ?? null,
   };
+}
+
+export function buildMercadoPagoWebhookManifest({
+  dataId = null,
+  xRequestId = null,
+  timestamp = null,
+}) {
+  let manifest = "";
+
+  if (typeof dataId === "string" && dataId.trim()) {
+    manifest += `id:${dataId.trim().toLowerCase()};`;
+  }
+  if (typeof xRequestId === "string" && xRequestId.trim()) {
+    manifest += `request-id:${xRequestId.trim()};`;
+  }
+  if (typeof timestamp === "string" && timestamp.trim()) {
+    manifest += `ts:${timestamp.trim()};`;
+  }
+
+  return manifest;
+}
+
+function parseWebhookSignature(xSignature) {
+  if (typeof xSignature !== "string" || !xSignature.trim()) {
+    return null;
+  }
+
+  const values = {};
+  for (const part of xSignature.split(",")) {
+    const separatorIndex = part.indexOf("=");
+    if (separatorIndex <= 0) {
+      continue;
+    }
+
+    const key = part.slice(0, separatorIndex).trim();
+    const value = part.slice(separatorIndex + 1).trim();
+    if (key && value) {
+      values[key] = value;
+    }
+  }
+
+  if (!values.ts || !values.v1 || !/^[a-f0-9]{64}$/i.test(values.v1)) {
+    return null;
+  }
+
+  return {
+    timestamp: values.ts,
+    hash: values.v1.toLowerCase(),
+  };
+}
+
+export function validateMercadoPagoWebhookSignature({
+  xSignature,
+  xRequestId = null,
+  dataId = null,
+}) {
+  const parsed = parseWebhookSignature(xSignature);
+  if (!parsed) {
+    return false;
+  }
+
+  const manifest = buildMercadoPagoWebhookManifest({
+    dataId,
+    xRequestId,
+    timestamp: parsed.timestamp,
+  });
+
+  if (!manifest) {
+    return false;
+  }
+
+  const expectedHash = createHmac("sha256", getWebhookSecret())
+    .update(manifest, "utf8")
+    .digest();
+  const receivedHash = Buffer.from(parsed.hash, "hex");
+
+  return (
+    receivedHash.length === expectedHash.length &&
+    timingSafeEqual(receivedHash, expectedHash)
+  );
 }
