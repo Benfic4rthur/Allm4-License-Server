@@ -1,7 +1,10 @@
-import { getPool } from "./db.js";
+import { getPool, withTransaction } from "./db.js";
 import { createPixOrder, extractPixDetails } from "./mercado-pago.js";
 
 export const ALLM4_LICENSE_PRICE_CENTS = 999;
+
+const PURCHASE_ID_PATTERN =
+  /^allm4_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i;
 
 function mapPurchase(row) {
   return {
@@ -15,6 +18,88 @@ function mapPurchase(row) {
     paid_at: row.paid_at ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+function amountToCents(value) {
+  if (typeof value !== "string" && typeof value !== "number") {
+    return null;
+  }
+
+  const normalized = String(value).trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(normalized)) {
+    return null;
+  }
+
+  const [units, decimal = ""] = normalized.split(".");
+  const cents = Number(units) * 100 + Number(decimal.padEnd(2, "0"));
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
+export function mapMercadoPagoOrderStatus(order) {
+  const status = order?.status;
+  const statusDetail = order?.status_detail;
+
+  if (status === "processed" && statusDetail === "accredited") {
+    return "approved";
+  }
+  if (status === "refunded") {
+    return "refunded";
+  }
+  if (status === "processed" && statusDetail === "refunded") {
+    return "refunded";
+  }
+  if (status === "charged_back") {
+    return "charged_back";
+  }
+  if (status === "canceled" || status === "expired") {
+    return "cancelled";
+  }
+  if (status === "failed") {
+    return "rejected";
+  }
+  if (
+    status === "created" ||
+    status === "processing" ||
+    status === "action_required"
+  ) {
+    return "pending";
+  }
+
+  return null;
+}
+
+export function inspectMercadoPagoOrder(order) {
+  const orderId = typeof order?.id === "string" ? order.id.trim() : "";
+  const externalReference =
+    typeof order?.external_reference === "string"
+      ? order.external_reference.trim()
+      : "";
+  const referenceMatch = externalReference.match(PURCHASE_ID_PATTERN);
+  const amountCents = amountToCents(order?.total_amount);
+  const currency = order?.currency ?? order?.currency_id ?? null;
+  const purchaseStatus = mapMercadoPagoOrderStatus(order);
+
+  if (!orderId) {
+    return { valid: false, reason: "missing_order_id" };
+  }
+  if (!referenceMatch) {
+    return { valid: false, reason: "invalid_external_reference" };
+  }
+  if (amountCents !== ALLM4_LICENSE_PRICE_CENTS || currency !== "BRL") {
+    return { valid: false, reason: "unexpected_amount_or_currency" };
+  }
+  if (!purchaseStatus) {
+    return { valid: false, reason: "unsupported_order_status" };
+  }
+
+  return {
+    valid: true,
+    orderId,
+    purchaseId: referenceMatch[1].toLowerCase(),
+    purchaseStatus,
+    amountCents,
+    currency,
   };
 }
 
@@ -66,4 +151,92 @@ export async function createPixPurchase({
     purchase: mapPurchase(updated.rows[0]),
     pix: extractPixDetails(order),
   };
+}
+
+export async function syncMercadoPagoPurchaseFromOrder(order) {
+  const inspected = inspectMercadoPagoOrder(order);
+  if (!inspected.valid) {
+    return {
+      updated: false,
+      ignored: true,
+      reason: inspected.reason,
+    };
+  }
+
+  return withTransaction(async (client) => {
+    const selected = await client.query(
+      `SELECT id, provider, provider_payment_id, payer_email, amount_cents,
+              currency, status, paid_at, created_at, updated_at
+       FROM purchases
+       WHERE id = $1
+       FOR UPDATE`,
+      [inspected.purchaseId],
+    );
+
+    const purchase = selected.rows[0];
+    if (!purchase) {
+      return {
+        updated: false,
+        ignored: true,
+        reason: "purchase_not_found",
+      };
+    }
+
+    if (
+      purchase.provider !== "mercado_pago" ||
+      purchase.amount_cents !== ALLM4_LICENSE_PRICE_CENTS ||
+      purchase.currency !== "BRL"
+    ) {
+      return {
+        updated: false,
+        ignored: true,
+        reason: "purchase_mismatch",
+      };
+    }
+
+    if (
+      purchase.provider_payment_id &&
+      purchase.provider_payment_id !== inspected.orderId
+    ) {
+      return {
+        updated: false,
+        ignored: true,
+        reason: "provider_order_mismatch",
+      };
+    }
+
+    if (
+      purchase.provider_payment_id === inspected.orderId &&
+      purchase.status === inspected.purchaseStatus
+    ) {
+      return {
+        updated: false,
+        ignored: false,
+        reason: "already_synchronized",
+        purchase: mapPurchase(purchase),
+      };
+    }
+
+    const updated = await client.query(
+      `UPDATE purchases
+       SET provider_payment_id = COALESCE(provider_payment_id, $2),
+           status = $3,
+           paid_at = CASE
+             WHEN $3 = 'approved' THEN COALESCE(paid_at, NOW())
+             ELSE paid_at
+           END,
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
+                 currency, status, paid_at, created_at, updated_at`,
+      [inspected.purchaseId, inspected.orderId, inspected.purchaseStatus],
+    );
+
+    return {
+      updated: true,
+      ignored: false,
+      reason: null,
+      purchase: mapPurchase(updated.rows[0]),
+    };
+  });
 }
