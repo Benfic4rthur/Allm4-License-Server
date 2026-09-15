@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
-    "check": "node --check src/app.js && node --check src/db.js && node --check scripts/migrate.js && node --check api/index.js && node --check server.js",
+    "check": "node --check src/app.js && node --check src/db.js && node --check src/admin-auth.js && node --check src/license-utils.js && node --check src/license-service.js && node --check src/license-routes.js && node --check scripts/migrate.js && node --check api/index.js && node --check server.js && node --check tests/license-utils.test.js",
+    "test": "node --test",
     "db:migrate": "node scripts/migrate.js"
   },
   "engines": {
