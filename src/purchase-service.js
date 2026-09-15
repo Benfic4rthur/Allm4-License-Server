@@ -1,5 +1,6 @@
 import { getPool, withTransaction } from "./db.js";
 import { createPixOrder, extractPixDetails } from "./mercado-pago.js";
+import { ensurePurchaseLicense } from "./purchase-license-service.js";
 
 export const ALLM4_LICENSE_PRICE_CENTS = 999;
 
@@ -205,38 +206,42 @@ export async function syncMercadoPagoPurchaseFromOrder(order) {
       };
     }
 
-    if (
+    const alreadySynchronized =
       purchase.provider_payment_id === inspected.orderId &&
-      purchase.status === inspected.purchaseStatus
-    ) {
-      return {
-        updated: false,
-        ignored: false,
-        reason: "already_synchronized",
-        purchase: mapPurchase(purchase),
-      };
+      purchase.status === inspected.purchaseStatus;
+
+    let synchronizedPurchase = purchase;
+    if (!alreadySynchronized) {
+      const updated = await client.query(
+        `UPDATE purchases
+         SET provider_payment_id = COALESCE(provider_payment_id, $2),
+             status = $3,
+             paid_at = CASE
+               WHEN $3 = 'approved' THEN COALESCE(paid_at, NOW())
+               ELSE paid_at
+             END,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
+                   currency, status, paid_at, created_at, updated_at`,
+        [inspected.purchaseId, inspected.orderId, inspected.purchaseStatus],
+      );
+      synchronizedPurchase = updated.rows[0];
     }
 
-    const updated = await client.query(
-      `UPDATE purchases
-       SET provider_payment_id = COALESCE(provider_payment_id, $2),
-           status = $3,
-           paid_at = CASE
-             WHEN $3 = 'approved' THEN COALESCE(paid_at, NOW())
-             ELSE paid_at
-           END,
-           updated_at = NOW()
-       WHERE id = $1
-       RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
-                 currency, status, paid_at, created_at, updated_at`,
-      [inspected.purchaseId, inspected.orderId, inspected.purchaseStatus],
-    );
+    let purchaseLicense = null;
+    if (inspected.purchaseStatus === "approved") {
+      purchaseLicense = await ensurePurchaseLicense(client, inspected.purchaseId);
+    }
 
     return {
-      updated: true,
+      updated: !alreadySynchronized,
       ignored: false,
-      reason: null,
-      purchase: mapPurchase(updated.rows[0]),
+      reason: alreadySynchronized ? "already_synchronized" : null,
+      purchase: mapPurchase(synchronizedPurchase),
+      license_issued: purchaseLicense?.issued ?? false,
+      license_recoverable: purchaseLicense?.recoverable ?? false,
+      license: purchaseLicense?.license ?? null,
     };
   });
 }
