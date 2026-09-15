@@ -7,13 +7,15 @@
   "scripts": {
     "dev": "node --watch server.js",
     "start": "node server.js",
-    "check": "node --check src/app.js && node --check api/index.js && node --check server.js"
+    "check": "node --check src/app.js && node --check src/db.js && node --check scripts/migrate.js && node --check api/index.js && node --check server.js",
+    "db:migrate": "node scripts/migrate.js"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
     "express": "^5.1.0",
-    "helmet": "^8.1.0"
+    "helmet": "^8.1.0",
+    "pg": "^8.13.1"
   }
 }
