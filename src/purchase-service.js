@@ -107,8 +107,12 @@ export async function createPixPurchase({ payerEmail, payerFirstName = null, fet
 }
 
 export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
-  if (typeof purchaseId !== "string" || !UUID_PATTERN.test(purchaseId)) return null;
-  if (!verifyPurchaseLookupToken(purchaseId, lookupToken)) return null;
+  if (typeof purchaseId !== "string" || !UUID_PATTERN.test(purchaseId)) {
+    return { ok: false, reason: "invalid_purchase_id" };
+  }
+  if (!verifyPurchaseLookupToken(purchaseId, lookupToken)) {
+    return { ok: false, reason: "invalid_lookup_token" };
+  }
   const result = await getPool().query(
     `SELECT p.id, p.status, p.amount_cents, p.currency, p.paid_at,
             l.id AS license_id, l.license_key_hash, l.status AS license_status
@@ -118,8 +122,8 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
     [purchaseId],
   );
   const row = result.rows[0];
-  if (!row) return null;
-  const response = {
+  if (!row) return { ok: false, reason: "purchase_not_found" };
+  const purchase = {
     purchase_id: row.id,
     status: row.status,
     amount_cents: row.amount_cents,
@@ -130,11 +134,11 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
   if (row.status === "approved" && row.license_id && row.license_status === "active") {
     const licenseKey = derivePurchaseLicenseKey(row.id);
     if (hashLicenseKey(licenseKey) === row.license_key_hash) {
-      response.license_ready = true;
-      response.license_key = licenseKey;
+      purchase.license_ready = true;
+      purchase.license_key = licenseKey;
     }
   }
-  return response;
+  return { ok: true, purchase };
 }
 
 export async function syncMercadoPagoPurchaseFromOrder(order) {
