@@ -1,4 +1,5 @@
 import {
+  createHash,
   createHmac,
   randomUUID,
   timingSafeEqual,
@@ -6,6 +7,7 @@ import {
 import { SecurityConfigurationError } from "./security.js";
 
 const MERCADO_PAGO_API_BASE_URL = "https://api.mercadopago.com";
+const SIGNATURE_DIAGNOSTIC_PREFIX_LENGTH = 12;
 
 export class MercadoPagoApiError extends Error {
   constructor(status, payload = null) {
@@ -217,6 +219,78 @@ function webhookSignatureMatchesManifest({ manifest, receivedHash, secret }) {
     receivedHash.length === expectedHash.length &&
     timingSafeEqual(receivedHash, expectedHash)
   );
+}
+
+function hmacPrefix(manifest, secret) {
+  if (!manifest) {
+    return null;
+  }
+
+  return createHmac("sha256", secret)
+    .update(manifest, "utf8")
+    .digest("hex")
+    .slice(0, SIGNATURE_DIAGNOSTIC_PREFIX_LENGTH);
+}
+
+export function getMercadoPagoWebhookSignatureDiagnostics({
+  xSignature,
+  xRequestId = null,
+  dataId = null,
+}) {
+  const parsed = parseWebhookSignature(xSignature);
+  const normalizedDataId =
+    typeof dataId === "string" && dataId.trim() ? dataId.trim() : null;
+
+  if (!parsed) {
+    return {
+      signature_format_valid: false,
+      request_id: xRequestId ?? null,
+      data_id: normalizedDataId,
+    };
+  }
+
+  const secret = getWebhookSecret();
+  const lowercaseDataId = normalizedDataId?.toLowerCase() ?? null;
+  const exactManifest = buildMercadoPagoWebhookManifest({
+    dataId: normalizedDataId,
+    xRequestId,
+    timestamp: parsed.timestamp,
+  });
+  const lowercaseManifest = buildMercadoPagoWebhookManifest({
+    dataId: lowercaseDataId,
+    xRequestId,
+    timestamp: parsed.timestamp,
+  });
+  const exactWithoutRequestIdManifest = buildMercadoPagoWebhookManifest({
+    dataId: normalizedDataId,
+    timestamp: parsed.timestamp,
+  });
+  const lowercaseWithoutRequestIdManifest = buildMercadoPagoWebhookManifest({
+    dataId: lowercaseDataId,
+    timestamp: parsed.timestamp,
+  });
+
+  return {
+    signature_format_valid: true,
+    request_id: xRequestId ?? null,
+    data_id: normalizedDataId,
+    timestamp: parsed.timestamp,
+    received_v1_prefix: parsed.hash.slice(0, SIGNATURE_DIAGNOSTIC_PREFIX_LENGTH),
+    computed_exact_prefix: hmacPrefix(exactManifest, secret),
+    computed_lowercase_prefix: hmacPrefix(lowercaseManifest, secret),
+    computed_without_request_id_prefix: hmacPrefix(
+      exactWithoutRequestIdManifest,
+      secret,
+    ),
+    computed_lowercase_without_request_id_prefix: hmacPrefix(
+      lowercaseWithoutRequestIdManifest,
+      secret,
+    ),
+    secret_fingerprint: createHash("sha256")
+      .update(secret, "utf8")
+      .digest("hex")
+      .slice(0, SIGNATURE_DIAGNOSTIC_PREFIX_LENGTH),
+  };
 }
 
 export function validateMercadoPagoWebhookSignature({

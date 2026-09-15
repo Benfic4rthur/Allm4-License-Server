@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import test from "node:test";
 import {
   buildMercadoPagoWebhookManifest,
+  getMercadoPagoWebhookSignatureDiagnostics,
   validateMercadoPagoWebhookSignature,
 } from "../src/mercado-pago.js";
 import {
@@ -90,6 +91,34 @@ test("rejects a Mercado Pago webhook when signed data is altered", () => {
     }),
     false,
   );
+});
+
+test("webhook signature diagnostics expose only short non-secret fingerprints", () => {
+  const dataId = "ORD01ABCDEF";
+  const xRequestId = "request-123";
+  const timestamp = "1742505638683";
+  const manifest =
+    "id:ORD01ABCDEF;request-id:request-123;ts:1742505638683;";
+  const hash = createHmac(
+    "sha256",
+    process.env.MERCADO_PAGO_WEBHOOK_SECRET,
+  )
+    .update(manifest, "utf8")
+    .digest("hex");
+
+  const diagnostics = getMercadoPagoWebhookSignatureDiagnostics({
+    xSignature: `ts=${timestamp},v1=${hash}`,
+    xRequestId,
+    dataId,
+  });
+  const serialized = JSON.stringify(diagnostics);
+
+  assert.equal(diagnostics.signature_format_valid, true);
+  assert.equal(diagnostics.received_v1_prefix, hash.slice(0, 12));
+  assert.equal(diagnostics.computed_exact_prefix, hash.slice(0, 12));
+  assert.equal(diagnostics.secret_fingerprint.length, 12);
+  assert.equal(serialized.includes(process.env.MERCADO_PAGO_WEBHOOK_SECRET), false);
+  assert.equal(serialized.includes(hash), false);
 });
 
 test("maps Orders API statuses to local purchase statuses", () => {
