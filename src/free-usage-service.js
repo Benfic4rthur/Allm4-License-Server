@@ -11,21 +11,33 @@ function parseInteger(value, { min, max, name }) {
   return parsed;
 }
 
+function allowedTotalForInstallations(installationCount) {
+  return FREE_USAGE_QUOTAS
+    .slice(0, Math.min(installationCount, FREE_USAGE_QUOTAS.length))
+    .reduce((total, quota) => total + quota, 0);
+}
+
+function minimumUsedForInstallations(installationCount) {
+  return allowedTotalForInstallations(Math.max(0, installationCount - 1));
+}
+
 export function getFreeUsageAllowance(installationCount, usedCount) {
   const installations = parseInteger(installationCount, {
     min: 1,
     max: 1000,
     name: "installation count",
   });
-  const used = parseInteger(usedCount, {
+  const reportedUsed = parseInteger(usedCount, {
     min: 0,
     max: 1000000,
     name: "used count",
   });
 
-  const allowedTotal = FREE_USAGE_QUOTAS
-    .slice(0, Math.min(installations, FREE_USAGE_QUOTAS.length))
-    .reduce((total, quota) => total + quota, 0);
+  const allowedTotal = allowedTotalForInstallations(installations);
+  const used = Math.max(
+    reportedUsed,
+    minimumUsedForInstallations(installations),
+  );
   const remaining = Math.max(0, allowedTotal - used);
 
   return {
@@ -50,11 +62,15 @@ export async function syncFreeUsage({
     max: 1000,
     name: "installation count",
   });
-  const used = parseInteger(usedCount, {
+  const reportedUsed = parseInteger(usedCount, {
     min: 0,
     max: 1000000,
     name: "used count",
   });
+  const used = Math.max(
+    reportedUsed,
+    minimumUsedForInstallations(installations),
+  );
   const deviceHash = hashDeviceId(normalizedDeviceId);
 
   const result = await getPool().query(
