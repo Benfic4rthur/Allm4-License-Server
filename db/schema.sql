@@ -8,10 +8,13 @@ CREATE TABLE IF NOT EXISTS purchases (
   amount_cents INTEGER NOT NULL CHECK (amount_cents > 0),
   currency TEXT NOT NULL DEFAULT 'BRL',
   status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled', 'refunded', 'charged_back')),
+  lookup_token_hash TEXT,
   paid_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE purchases ADD COLUMN IF NOT EXISTS lookup_token_hash TEXT;
 
 CREATE TABLE IF NOT EXISTS licenses (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -47,6 +50,7 @@ CREATE TABLE IF NOT EXISTS activations (
 );
 
 CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
+CREATE INDEX IF NOT EXISTS idx_purchases_lookup_token_hash ON purchases(lookup_token_hash) WHERE lookup_token_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses(status);
 CREATE INDEX IF NOT EXISTS idx_devices_license_id ON devices(license_id);
 CREATE INDEX IF NOT EXISTS idx_devices_active ON devices(license_id) WHERE deactivated_at IS NULL;
