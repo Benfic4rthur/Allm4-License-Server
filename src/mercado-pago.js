@@ -167,7 +167,7 @@ export function buildMercadoPagoWebhookManifest({
   let manifest = "";
 
   if (typeof dataId === "string" && dataId.trim()) {
-    manifest += `id:${dataId.trim().toLowerCase()};`;
+    manifest += `id:${dataId.trim()};`;
   }
   if (typeof xRequestId === "string" && xRequestId.trim()) {
     manifest += `request-id:${xRequestId.trim()};`;
