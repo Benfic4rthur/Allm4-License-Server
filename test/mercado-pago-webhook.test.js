@@ -158,7 +158,7 @@ test("accepts only the expected Allm4 order amount, currency and reference", () 
   const order = {
     id: "ORD01ABCDEF",
     external_reference: "allm4_123e4567-e89b-42d3-a456-426614174000",
-    total_amount: "9.99",
+    total_amount: "49.99",
     currency: "BRL",
     status: "processed",
     status_detail: "accredited",
@@ -169,11 +169,11 @@ test("accepts only the expected Allm4 order amount, currency and reference", () 
     orderId: "ORD01ABCDEF",
     purchaseId: "123e4567-e89b-42d3-a456-426614174000",
     purchaseStatus: "approved",
-    amountCents: 999,
+    amountCents: 4999,
     currency: "BRL",
   });
 
-  assert.deepEqual(inspectMercadoPagoOrder({ ...order, total_amount: "10.00" }), {
+  assert.deepEqual(inspectMercadoPagoOrder({ ...order, total_amount: "50.00" }), {
     valid: false,
     reason: "unexpected_amount_or_currency",
   });
