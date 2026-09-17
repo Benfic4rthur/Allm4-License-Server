@@ -1,6 +1,7 @@
 import express from "express";
 import helmet from "helmet";
 import { checkDatabaseConnection } from "./db.js";
+import freeUsageRouter from "./free-usage-routes.js";
 import licenseRouter from "./license-routes.js";
 import purchaseRouter from "./purchase-routes.js";
 import webhookRouter from "./webhook-routes.js";
@@ -43,6 +44,7 @@ app.get("/api/health/db", async (_req, res) => {
   }
 });
 
+app.use("/api", freeUsageRouter);
 app.use("/api", licenseRouter);
 app.use("/api", purchaseRouter);
 app.use("/api", webhookRouter);
