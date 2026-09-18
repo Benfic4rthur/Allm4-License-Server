@@ -108,3 +108,30 @@ CREATE TABLE IF NOT EXISTS bug_report_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bug_report_events_bug ON bug_report_events(bug_report_id, created_at ASC);
+
+
+CREATE TABLE IF NOT EXISTS bug_report_watchers (
+  id BIGSERIAL PRIMARY KEY,
+  bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+  tracking_token_hash TEXT UNIQUE NOT NULL,
+  app_version TEXT,
+  platform TEXT,
+  arch TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS bug_report_occurrences (
+  id BIGSERIAL PRIMARY KEY,
+  bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+  app_version TEXT,
+  platform TEXT,
+  arch TEXT,
+  description TEXT,
+  error_message TEXT,
+  error_context TEXT,
+  diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bug_report_watchers_bug ON bug_report_watchers(bug_report_id);
+CREATE INDEX IF NOT EXISTS idx_bug_report_occurrences_bug ON bug_report_occurrences(bug_report_id, created_at DESC);
