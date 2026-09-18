@@ -29,6 +29,7 @@ function normalizeText(value, maxLength, fallback = "") {
 
 function redactText(value) {
   return String(value || "")
+    .replace(/("(?:authorization|password|access[_-]?token|refresh[_-]?token|github[_-]?token|private[_-]?token|client[_-]?token|license[_-]?key)"\s*:\s*")[^"]*/gi, "$1[REDACTED]")
     .replace(/(authorization\s*[:=]\s*)(bearer\s+)?[^\s"'\]}]+/gi, "$1[REDACTED]")
     .replace(/((?:access|refresh|github|private|client|license)[_-]?(?:token|key)\s*[:=]\s*)[^\s"'\]}]+/gi, "$1[REDACTED]")
     .replace(/(password\s*[:=]\s*)[^\s"'\]}]+/gi, "$1[REDACTED]")
