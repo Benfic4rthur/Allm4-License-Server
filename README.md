@@ -154,7 +154,7 @@ Essas rotas exigem BUG_MAINTAINER_SECRET.
 
 Segredos adicionais:
 
-- BUG_REPORT_SECRET: HMAC dos tokens privados de acompanhamento
-- BUG_MAINTAINER_SECRET: autenticação do serviço interno que roda somente no Mac do mantenedor
+- BUG_REPORT_SECRET: HMAC dos tokens privados de acompanhamento. Se ausente, usa LICENSE_HASH_SECRET.
+- BUG_MAINTAINER_SECRET: autenticação do serviço interno que roda somente no Mac do mantenedor. Se ausente, usa ADMIN_SECRET.
 
 Os relatórios removem padrões comuns de token/senha antes de persistir os diagnósticos. O tracking_token completo não é armazenado no banco.
