@@ -133,3 +133,28 @@ npm test
 ```
 
 O GitHub Actions executa as duas validações em pull requests e na branch `main`.
+
+
+## API de bugs
+
+O servidor também recebe relatórios técnicos do aplicativo e mantém a linha do tempo de atendimento.
+
+Rotas públicas:
+
+- POST /api/bugs: cria um relatório e devolve um tracking_token de uso único para aquela instalação
+- GET /api/bugs/:bugId?tracking_token=...: consulta apenas o estado público do relatório
+
+Rotas do Mac mantenedor:
+
+- GET /api/admin/bugs/queue
+- POST /api/admin/bugs/:bugId/claim
+- PATCH /api/admin/bugs/:bugId
+
+Essas rotas exigem BUG_MAINTAINER_SECRET.
+
+Segredos adicionais:
+
+- BUG_REPORT_SECRET: HMAC dos tokens privados de acompanhamento. Se ausente, usa LICENSE_HASH_SECRET.
+- BUG_MAINTAINER_SECRET: autenticação do serviço interno que roda somente no Mac do mantenedor. Se ausente, usa ADMIN_SECRET.
+
+Os relatórios removem padrões comuns de token/senha antes de persistir os diagnósticos. O tracking_token completo não é armazenado no banco.
