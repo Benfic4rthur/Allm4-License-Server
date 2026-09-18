@@ -19,6 +19,62 @@ const PUBLIC_STATUSES = new Set([
 ]);
 
 const MAX_DIAGNOSTICS_CHARS = 90000;
+let schemaReady = null;
+
+async function ensureBugSchema() {
+  if (!schemaReady) {
+    schemaReady = getPool().query(`
+      CREATE TABLE IF NOT EXISTS bug_reports (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        number BIGSERIAL UNIQUE NOT NULL,
+        tracking_token_hash TEXT UNIQUE NOT NULL,
+        status TEXT NOT NULL DEFAULT 'reported' CHECK (status IN (
+          'reported','received','working','changes_ready','awaiting_approval',
+          'merging','releasing','update_available','resolved','blocked'
+        )),
+        title TEXT NOT NULL,
+        description TEXT,
+        module TEXT,
+        app_version TEXT NOT NULL,
+        platform TEXT,
+        arch TEXT,
+        error_message TEXT,
+        error_context TEXT,
+        signature_hash TEXT,
+        diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb,
+        duplicate_count INTEGER NOT NULL DEFAULT 1 CHECK (duplicate_count > 0),
+        github_issue_number INTEGER,
+        github_issue_url TEXT,
+        github_branch TEXT,
+        pull_request_url TEXT,
+        release_version TEXT,
+        maintainer_note TEXT,
+        claimed_at TIMESTAMPTZ,
+        resolved_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS bug_report_events (
+        id BIGSERIAL PRIMARY KEY,
+        bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        note TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status);
+      CREATE INDEX IF NOT EXISTS idx_bug_reports_created_at ON bug_reports(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_bug_reports_signature ON bug_reports(signature_hash) WHERE signature_hash IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_bug_report_events_bug ON bug_report_events(bug_report_id, created_at ASC);
+    `).catch((error) => {
+      schemaReady = null;
+      throw error;
+    });
+  }
+  return schemaReady;
+}
 
 function normalizeText(value, maxLength, fallback = "") {
   if (value === undefined || value === null) return fallback;
@@ -127,6 +183,7 @@ function toMaintainerReport(row) {
 }
 
 export async function createBugReport(input) {
+  await ensureBugSchema();
   const title = normalizeText(input.title, 180, "Erro reportado pelo Allm4");
   const appVersion = normalizeText(input.appVersion, 80);
   if (!appVersion) {
@@ -198,6 +255,7 @@ export async function createBugReport(input) {
 }
 
 export async function getBugReportForClient(number, trackingToken) {
+  await ensureBugSchema();
   const numeric = Number(number);
   if (!Number.isInteger(numeric) || numeric < 1) return null;
   let tokenHash;
@@ -223,6 +281,7 @@ export async function getBugReportForClient(number, trackingToken) {
 }
 
 export async function listMaintainerQueue(limit = 20) {
+  await ensureBugSchema();
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
   const pool = getPool();
   const result = await pool.query(
@@ -245,6 +304,7 @@ export async function listMaintainerQueue(limit = 20) {
 }
 
 export async function claimBugReport(number, note = "") {
+  await ensureBugSchema();
   const numeric = Number(number);
   if (!Number.isInteger(numeric) || numeric < 1) return null;
 
@@ -290,6 +350,7 @@ export async function claimBugReport(number, note = "") {
 }
 
 export async function updateBugReport(number, patch = {}) {
+  await ensureBugSchema();
   const numeric = Number(number);
   if (!Number.isInteger(numeric) || numeric < 1) return null;
 
