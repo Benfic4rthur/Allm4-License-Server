@@ -135,3 +135,24 @@ export function verifyAdminSecret(candidate) {
   const received = typeof candidate === "string" ? candidate.trim() : "";
   return received.length > 0 && constantTimeStringEquals(received, expected);
 }
+
+export function verifyBugMaintainerSecret(candidate) {
+  const expected = getRequiredSecret("BUG_MAINTAINER_SECRET");
+  const received = typeof candidate === "string" ? candidate.trim() : "";
+  return received.length > 0 && constantTimeStringEquals(received, expected);
+}
+
+export function hashBugTrackingToken(value) {
+  const token = typeof value === "string" ? value.trim() : "";
+  if (token.length < 24 || token.length > 256) {
+    throw new TypeError("Invalid bug tracking token");
+  }
+  const secret = getRequiredSecret("BUG_REPORT_SECRET");
+  return createHmac("sha256", secret)
+    .update(`bug-tracking:${token}`, "utf8")
+    .digest("hex");
+}
+
+export function generateBugTrackingToken() {
+  return randomBytes(32).toString("base64url");
+}
