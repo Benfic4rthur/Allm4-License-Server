@@ -52,3 +52,47 @@ CREATE INDEX IF NOT EXISTS idx_devices_license_id ON devices(license_id);
 CREATE INDEX IF NOT EXISTS idx_devices_active ON devices(license_id) WHERE deactivated_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_activations_license_id ON activations(license_id);
 CREATE INDEX IF NOT EXISTS idx_activations_created_at ON activations(created_at DESC);
+
+
+CREATE TABLE IF NOT EXISTS bug_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  number BIGSERIAL UNIQUE NOT NULL,
+  tracking_token_hash TEXT UNIQUE NOT NULL,
+  status TEXT NOT NULL DEFAULT 'reported' CHECK (status IN (
+    'reported',
+    'received',
+    'working',
+    'changes_ready',
+    'awaiting_approval',
+    'merging',
+    'releasing',
+    'update_available',
+    'resolved',
+    'blocked'
+  )),
+  title TEXT NOT NULL,
+  description TEXT,
+  module TEXT,
+  app_version TEXT NOT NULL,
+  platform TEXT,
+  arch TEXT,
+  error_message TEXT,
+  error_context TEXT,
+  signature_hash TEXT,
+  diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb,
+  duplicate_count INTEGER NOT NULL DEFAULT 1 CHECK (duplicate_count > 0),
+  github_issue_number INTEGER,
+  github_issue_url TEXT,
+  github_branch TEXT,
+  pull_request_url TEXT,
+  release_version TEXT,
+  maintainer_note TEXT,
+  claimed_at TIMESTAMPTZ,
+  resolved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_created_at ON bug_reports(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bug_reports_signature ON bug_reports(signature_hash) WHERE signature_hash IS NOT NULL;
