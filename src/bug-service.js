@@ -222,14 +222,90 @@ export async function createBugReport(input) {
   const errorMessage = redactText(normalizeText(input.errorMessage, 8000));
   const errorContext = redactText(normalizeText(input.errorContext, 2000));
   const description = redactText(normalizeText(input.description, 8000));
+  const moduleName = normalizeText(input.module, 200);
+  const platform = normalizeText(input.platform, 120);
+  const arch = normalizeText(input.arch, 120);
   const signatureHash = signatureFor({
     errorMessage,
     errorContext,
-    module: input.module,
-    appVersion,
+    module: moduleName,
   });
 
   const result = await withTransaction(async (client) => {
+    let existing = null;
+    if (signatureHash) {
+      const matched = await client.query(
+        `SELECT * FROM bug_reports
+         WHERE signature_hash = $1
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [signatureHash],
+      );
+      existing = matched.rows[0] || null;
+    }
+
+    if (existing) {
+      const previousStatus = existing.status;
+      const reopened = previousStatus === "resolved" || previousStatus === "update_available";
+      const updated = await client.query(
+        `UPDATE bug_reports
+         SET duplicate_count = duplicate_count + 1,
+             status = CASE WHEN $2 THEN 'reported' ELSE status END,
+             resolved_at = CASE WHEN $2 THEN NULL ELSE resolved_at END,
+             claimed_at = CASE WHEN $2 THEN NULL ELSE claimed_at END,
+             pull_request_url = CASE WHEN $2 THEN NULL ELSE pull_request_url END,
+             release_version = CASE WHEN $2 THEN NULL ELSE release_version END,
+             maintainer_note = CASE WHEN $2 THEN NULL ELSE maintainer_note END,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING *`,
+        [existing.id, reopened],
+      );
+      const row = updated.rows[0];
+
+      await client.query(
+        `INSERT INTO bug_report_watchers (
+          bug_report_id, tracking_token_hash, app_version, platform, arch
+        ) VALUES ($1, $2, $3, $4, $5)`,
+        [row.id, trackingTokenHash, appVersion, platform || null, arch || null],
+      );
+      await client.query(
+        `INSERT INTO bug_report_occurrences (
+          bug_report_id, app_version, platform, arch, description,
+          error_message, error_context, diagnostics
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+        [
+          row.id,
+          appVersion,
+          platform || null,
+          arch || null,
+          description || null,
+          errorMessage || null,
+          errorContext || null,
+          JSON.stringify(diagnostics),
+        ],
+      );
+      await client.query(
+        "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, $2, $3, $4::jsonb)",
+        [
+          row.id,
+          row.status,
+          reopened
+            ? "O mesmo problema voltou a ocorrer após uma correção anterior. O Alma Repair reabriu o atendimento."
+            : "Outra instalação encontrou o mesmo problema. A ocorrência foi agrupada automaticamente.",
+          JSON.stringify({
+            occurrence_app_version: appVersion,
+            previous_status: previousStatus,
+            deduplicated: true,
+            reopened,
+          }),
+        ],
+      );
+
+      return { row, deduplicated: true, reopened };
+    }
+
     const inserted = await client.query(
       `INSERT INTO bug_reports (
         tracking_token_hash,
@@ -250,10 +326,10 @@ export async function createBugReport(input) {
         trackingTokenHash,
         title,
         description || null,
-        normalizeText(input.module, 200) || null,
+        moduleName || null,
         appVersion,
-        normalizeText(input.platform, 120) || null,
-        normalizeText(input.arch, 120) || null,
+        platform || null,
+        arch || null,
         errorMessage || null,
         errorContext || null,
         signatureHash,
@@ -262,19 +338,46 @@ export async function createBugReport(input) {
     );
     const row = inserted.rows[0];
     await client.query(
-      "INSERT INTO bug_report_events (bug_report_id, status, note) VALUES ($1, 'reported', $2)",
-      [row.id, "Relatório enviado pelo aplicativo."],
+      `INSERT INTO bug_report_watchers (
+        bug_report_id, tracking_token_hash, app_version, platform, arch
+      ) VALUES ($1, $2, $3, $4, $5)`,
+      [row.id, trackingTokenHash, appVersion, platform || null, arch || null],
     );
-    return row;
+    await client.query(
+      `INSERT INTO bug_report_occurrences (
+        bug_report_id, app_version, platform, arch, description,
+        error_message, error_context, diagnostics
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
+      [
+        row.id,
+        appVersion,
+        platform || null,
+        arch || null,
+        description || null,
+        errorMessage || null,
+        errorContext || null,
+        JSON.stringify(diagnostics),
+      ],
+    );
+    await client.query(
+      "INSERT INTO bug_report_events (bug_report_id, status, note) VALUES ($1, 'reported', $2)",
+      [row.id, input.automatic === true
+        ? "Falha detectada e enviada automaticamente pelo Alma Repair."
+        : "Relatório enviado manualmente pelo aplicativo."],
+    );
+    return { row, deduplicated: false, reopened: false };
   });
 
+  const events = await getPool().query(
+    "SELECT status, note, created_at FROM bug_report_events WHERE bug_report_id = $1 ORDER BY created_at ASC, id ASC",
+    [result.row.id],
+  );
+
   return {
-    report: toPublicReport(result, [{
-      status: "reported",
-      note: "Relatório enviado pelo aplicativo.",
-      created_at: result.created_at,
-    }]),
+    report: toPublicReport(result.row, events.rows),
     tracking_token: trackingToken,
+    deduplicated: result.deduplicated,
+    reopened: result.reopened,
   };
 }
 
