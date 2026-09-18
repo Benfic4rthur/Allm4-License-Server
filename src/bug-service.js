@@ -257,10 +257,27 @@ export async function createBugReport(input) {
              pull_request_url = CASE WHEN $2 THEN NULL ELSE pull_request_url END,
              release_version = CASE WHEN $2 THEN NULL ELSE release_version END,
              maintainer_note = CASE WHEN $2 THEN NULL ELSE maintainer_note END,
+             app_version = $3,
+             platform = COALESCE(NULLIF($4, ''), platform),
+             arch = COALESCE(NULLIF($5, ''), arch),
+             error_message = COALESCE(NULLIF($6, ''), error_message),
+             error_context = COALESCE(NULLIF($7, ''), error_context),
+             diagnostics = $8::jsonb,
+             description = COALESCE(NULLIF($9, ''), description),
              updated_at = NOW()
          WHERE id = $1
          RETURNING *`,
-        [existing.id, reopened],
+        [
+          existing.id,
+          reopened,
+          appVersion,
+          platform,
+          arch,
+          errorMessage,
+          errorContext,
+          JSON.stringify(diagnostics),
+          description,
+        ],
       );
       const row = updated.rows[0];
 
@@ -394,7 +411,19 @@ export async function getBugReportForClient(number, trackingToken) {
 
   const pool = getPool();
   const result = await pool.query(
-    "SELECT * FROM bug_reports WHERE number = $1 AND tracking_token_hash = $2 LIMIT 1",
+    `SELECT br.*
+     FROM bug_reports br
+     WHERE br.number = $1
+       AND (
+         br.tracking_token_hash = $2
+         OR EXISTS (
+           SELECT 1
+           FROM bug_report_watchers watcher
+           WHERE watcher.bug_report_id = br.id
+             AND watcher.tracking_token_hash = $2
+         )
+       )
+     LIMIT 1`,
     [numeric, tokenHash],
   );
   const row = result.rows[0];
