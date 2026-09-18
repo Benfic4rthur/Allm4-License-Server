@@ -257,6 +257,12 @@ export async function claimBugReport(number, note = "") {
 
     let nextStatus = row.status;
     if (row.status === "reported" || row.status === "received" || row.status === "blocked") {
+      if (row.status === "reported") {
+        await client.query(
+          "INSERT INTO bug_report_events (bug_report_id, status, note) VALUES ($1, 'received', $2)",
+          [row.id, "Relatório recebido pela fila de manutenção."],
+        );
+      }
       nextStatus = "working";
       const updated = await client.query(
         `UPDATE bug_reports
