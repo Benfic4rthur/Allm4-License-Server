@@ -74,6 +74,7 @@ router.post("/bugs", async (req, res) => {
       errorMessage: body.error_message,
       errorContext: body.error_context,
       diagnostics: body.diagnostics,
+      automatic: body.automatic === true,
     });
 
     return res.status(201).json({
