@@ -96,3 +96,15 @@ CREATE TABLE IF NOT EXISTS bug_reports (
 CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status);
 CREATE INDEX IF NOT EXISTS idx_bug_reports_created_at ON bug_reports(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bug_reports_signature ON bug_reports(signature_hash) WHERE signature_hash IS NOT NULL;
+
+
+CREATE TABLE IF NOT EXISTS bug_report_events (
+  id BIGSERIAL PRIMARY KEY,
+  bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  note TEXT,
+  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bug_report_events_bug ON bug_report_events(bug_report_id, created_at ASC);
