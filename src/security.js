@@ -137,7 +137,7 @@ export function verifyAdminSecret(candidate) {
 }
 
 export function verifyBugMaintainerSecret(candidate) {
-  const expected = getRequiredSecret("BUG_MAINTAINER_SECRET");
+  const expected = process.env.BUG_MAINTAINER_SECRET?.trim() || getRequiredSecret("ADMIN_SECRET");
   const received = typeof candidate === "string" ? candidate.trim() : "";
   return received.length > 0 && constantTimeStringEquals(received, expected);
 }
@@ -147,7 +147,7 @@ export function hashBugTrackingToken(value) {
   if (token.length < 24 || token.length > 256) {
     throw new TypeError("Invalid bug tracking token");
   }
-  const secret = getRequiredSecret("BUG_REPORT_SECRET");
+  const secret = process.env.BUG_REPORT_SECRET?.trim() || getRequiredSecret("LICENSE_HASH_SECRET");
   return createHmac("sha256", secret)
     .update(`bug-tracking:${token}`, "utf8")
     .digest("hex");
