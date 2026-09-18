@@ -67,7 +67,32 @@ async function ensureBugSchema() {
       CREATE INDEX IF NOT EXISTS idx_bug_reports_status ON bug_reports(status);
       CREATE INDEX IF NOT EXISTS idx_bug_reports_created_at ON bug_reports(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_bug_reports_signature ON bug_reports(signature_hash) WHERE signature_hash IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS bug_report_watchers (
+        id BIGSERIAL PRIMARY KEY,
+        bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+        tracking_token_hash TEXT UNIQUE NOT NULL,
+        app_version TEXT,
+        platform TEXT,
+        arch TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS bug_report_occurrences (
+        id BIGSERIAL PRIMARY KEY,
+        bug_report_id UUID NOT NULL REFERENCES bug_reports(id) ON DELETE CASCADE,
+        app_version TEXT,
+        platform TEXT,
+        arch TEXT,
+        description TEXT,
+        error_message TEXT,
+        error_context TEXT,
+        diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
       CREATE INDEX IF NOT EXISTS idx_bug_report_events_bug ON bug_report_events(bug_report_id, created_at ASC);
+      CREATE INDEX IF NOT EXISTS idx_bug_report_watchers_bug ON bug_report_watchers(bug_report_id);
+      CREATE INDEX IF NOT EXISTS idx_bug_report_occurrences_bug ON bug_report_occurrences(bug_report_id, created_at DESC);
     `).catch((error) => {
       schemaReady = null;
       throw error;
@@ -115,7 +140,6 @@ function signatureFor(input) {
     normalizeText(input.errorMessage, 4000),
     normalizeText(input.errorContext, 1000),
     normalizeText(input.module, 200),
-    normalizeText(input.appVersion, 80),
   ]
     .join("\n")
     .toLowerCase()
