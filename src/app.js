@@ -4,12 +4,13 @@ import { checkDatabaseConnection } from "./db.js";
 import licenseRouter from "./license-routes.js";
 import purchaseRouter from "./purchase-routes.js";
 import webhookRouter from "./webhook-routes.js";
+import bugRouter from "./bug-routes.js";
 
 const app = express();
 
 app.disable("x-powered-by");
 app.use(helmet());
-app.use(express.json({ limit: "32kb" }));
+app.use(express.json({ limit: "128kb" }));
 
 app.get("/", (_req, res) => {
   res.status(200).json({
@@ -46,6 +47,7 @@ app.get("/api/health/db", async (_req, res) => {
 app.use("/api", licenseRouter);
 app.use("/api", purchaseRouter);
 app.use("/api", webhookRouter);
+app.use("/api", bugRouter);
 
 app.use((_req, res) => {
   res.status(404).json({
