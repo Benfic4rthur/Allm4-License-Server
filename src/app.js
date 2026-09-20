@@ -5,6 +5,7 @@ import licenseRouter from "./license-routes.js";
 import purchaseRouter from "./purchase-routes.js";
 import webhookRouter from "./webhook-routes.js";
 import bugRouter from "./bug-routes.js";
+import freeUsageRouter from "./free-usage-routes.js";
 
 const app = express();
 
@@ -48,6 +49,7 @@ app.use("/api", licenseRouter);
 app.use("/api", purchaseRouter);
 app.use("/api", webhookRouter);
 app.use("/api", bugRouter);
+app.use("/api", freeUsageRouter);
 
 app.use((_req, res) => {
   res.status(404).json({

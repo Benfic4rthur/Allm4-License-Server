@@ -54,6 +54,19 @@ CREATE INDEX IF NOT EXISTS idx_activations_license_id ON activations(license_id)
 CREATE INDEX IF NOT EXISTS idx_activations_created_at ON activations(created_at DESC);
 
 
+CREATE TABLE IF NOT EXISTS free_usage_devices (
+  device_hash TEXT PRIMARY KEY,
+  installation_count INTEGER NOT NULL DEFAULT 1 CHECK (installation_count >= 1),
+  used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_free_usage_devices_last_seen
+  ON free_usage_devices(last_seen_at DESC);
+
+
 CREATE TABLE IF NOT EXISTS bug_reports (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   number BIGSERIAL UNIQUE NOT NULL,

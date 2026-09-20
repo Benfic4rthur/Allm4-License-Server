@@ -158,3 +158,24 @@ Segredos adicionais:
 - BUG_MAINTAINER_SECRET: autenticação do serviço interno que roda somente no Mac do mantenedor. Se ausente, usa ADMIN_SECRET.
 
 Os relatórios removem padrões comuns de token/senha antes de persistir os diagnósticos. O tracking_token completo não é armazenado no banco.
+
+
+## API de uso gratuito
+
+O aplicativo sincroniza o contador gratuito por dispositivo em:
+
+`POST /api/free-usage/sync`
+
+Body:
+
+```json
+{
+  "device_id": "identificador-estavel-do-dispositivo",
+  "installation_count": 1,
+  "used_count": 0
+}
+```
+
+O servidor nunca reduz os contadores recebidos anteriormente. Reinstalações acumulam as cotas `5 + 4 + 3 + 2 + 1` e não restauram usos já consumidos. O `device_id` é persistido apenas como HMAC e não em texto puro.
+
+A tabela `free_usage_devices` também é criada defensivamente na primeira sincronização, permitindo que deployments existentes passem a atender a rota sem depender de uma janela separada de migração. O schema oficial continua registrado em `db/schema.sql`.
