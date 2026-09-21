@@ -837,6 +837,29 @@ export async function setManagedDeviceBlocked({
       });
     }
 
+    if (!blocked && (target.blocked_at || target.deactivated_at)) {
+      const activeDevices = await countActiveDevices(client, license.id);
+      if (activeDevices >= license.max_devices) {
+        return businessFailure(client, {
+          code: "device_limit_reached",
+          status: 409,
+          licenseId: license.id,
+          deviceId: target.id,
+          ipHash,
+          metadata: {
+            action: "managed_allow",
+            reason: "device_limit_reached",
+            active_devices: activeDevices,
+            max_devices: license.max_devices,
+          },
+          details: {
+            active_devices: activeDevices,
+            max_devices: license.max_devices,
+          },
+        });
+      }
+    }
+
     const updated = blocked
       ? await client.query(
           `UPDATE devices
@@ -850,6 +873,7 @@ export async function setManagedDeviceBlocked({
       : await client.query(
           `UPDATE devices
            SET blocked_at = NULL,
+               deactivated_at = NULL,
                last_seen_at = NOW()
            WHERE id = $1
            RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
@@ -859,7 +883,7 @@ export async function setManagedDeviceBlocked({
     await recordActivation(client, {
       licenseId: license.id,
       deviceId: target.id,
-      eventType: blocked ? "deactivated" : "validated",
+      eventType: blocked ? "deactivated" : "activated",
       ipHash,
       metadata: {
         action: blocked ? "managed_remove" : "managed_allow",
@@ -874,7 +898,7 @@ export async function setManagedDeviceBlocked({
           ...mapDevice(updated.rows[0]),
           is_primary: false,
           is_current: false,
-          status: blocked ? "removed" : "inactive",
+          status: blocked ? "removed" : "active",
         },
         max_devices: license.max_devices,
         active_devices: await countActiveDevices(client, license.id),
