@@ -14,26 +14,22 @@ function getObjectBody(req) {
   return req.body;
 }
 
-function validInteger(value, minimum, maximum) {
-  return Number.isInteger(value) && value >= minimum && value <= maximum;
+function validCounter(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 1000000;
 }
 
 router.post("/free-usage/sync", async (req, res) => {
   const body = getObjectBody(req);
   const deviceId = normalizeDeviceId(body.device_id);
-  const installationCount = body.installation_count;
-  const usedCount = body.used_count;
+  const chatUsed = body.chat_used;
+  const imageUsed = body.image_used;
+  const projectUsed = body.project_used;
   const fields = {};
 
-  if (!deviceId) {
-    fields.device_id = "invalid";
-  }
-  if (!validInteger(installationCount, 1, 1000)) {
-    fields.installation_count = "must_be_integer_between_1_and_1000";
-  }
-  if (!validInteger(usedCount, 0, 1000000)) {
-    fields.used_count = "must_be_integer_between_0_and_1000000";
-  }
+  if (!deviceId) fields.device_id = "invalid";
+  if (!validCounter(chatUsed)) fields.chat_used = "must_be_non_negative_integer";
+  if (!validCounter(imageUsed)) fields.image_used = "must_be_non_negative_integer";
+  if (!validCounter(projectUsed)) fields.project_used = "must_be_non_negative_integer";
 
   if (Object.keys(fields).length > 0) {
     return res.status(400).json({
@@ -46,8 +42,9 @@ router.post("/free-usage/sync", async (req, res) => {
   try {
     const freeUsage = await syncFreeUsage({
       deviceId,
-      installationCount,
-      usedCount,
+      chatUsed,
+      imageUsed,
+      projectUsed,
     });
     return res.status(200).json({
       ok: true,
