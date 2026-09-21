@@ -14,25 +14,29 @@ function getObjectBody(req) {
   return req.body;
 }
 
-function validInteger(value, minimum, maximum) {
-  return Number.isInteger(value) && value >= minimum && value <= maximum;
+function validCounter(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 1000000;
 }
 
 router.post("/free-usage/sync", async (req, res) => {
   const body = getObjectBody(req);
   const deviceId = normalizeDeviceId(body.device_id);
-  const installationCount = body.installation_count;
-  const usedCount = body.used_count;
+  const isV2 = body.chat_used !== undefined || body.image_used !== undefined || body.project_used !== undefined;
+  const chatUsed = isV2 ? body.chat_used : 0;
+  const imageUsed = isV2 ? body.image_used : 0;
+  const projectUsed = isV2 ? body.project_used : 0;
   const fields = {};
 
-  if (!deviceId) {
-    fields.device_id = "invalid";
-  }
-  if (!validInteger(installationCount, 1, 1000)) {
-    fields.installation_count = "must_be_integer_between_1_and_1000";
-  }
-  if (!validInteger(usedCount, 0, 1000000)) {
-    fields.used_count = "must_be_integer_between_0_and_1000000";
+  if (!deviceId) fields.device_id = "invalid";
+  if (isV2) {
+    if (!validCounter(chatUsed)) fields.chat_used = "must_be_non_negative_integer";
+    if (!validCounter(imageUsed)) fields.image_used = "must_be_non_negative_integer";
+    if (!validCounter(projectUsed)) fields.project_used = "must_be_non_negative_integer";
+  } else {
+    if (!Number.isInteger(body.installation_count) || body.installation_count < 1) {
+      fields.installation_count = "must_be_positive_integer";
+    }
+    if (!validCounter(body.used_count)) fields.used_count = "must_be_non_negative_integer";
   }
 
   if (Object.keys(fields).length > 0) {
@@ -46,9 +50,14 @@ router.post("/free-usage/sync", async (req, res) => {
   try {
     const freeUsage = await syncFreeUsage({
       deviceId,
-      installationCount,
-      usedCount,
+      chatUsed,
+      imageUsed,
+      projectUsed,
     });
+    if (!isV2) {
+      freeUsage.installation_count = 1;
+      freeUsage.used_count = 0;
+    }
     return res.status(200).json({
       ok: true,
       free_usage: freeUsage,

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  allowedTotalForInstallations,
+  FREE_USAGE_LIMIT,
   mergeFreeUsageState,
-  minimumUsedForInstallations,
 } from "../src/free-usage-service.js";
+import { hashDeviceId } from "../src/security.js";
 
 process.env.LICENSE_HASH_SECRET =
   "test-license-hash-secret-with-at-least-32-characters";
@@ -13,8 +13,9 @@ function createFakeClient(initial = null) {
   let row = initial
     ? {
         device_hash: initial.device_hash,
-        installation_count: initial.installation_count,
-        used_count: initial.used_count,
+        chat_used: initial.chat_used,
+        image_used: initial.image_used,
+        project_used: initial.project_used,
         first_seen_at: new Date("2026-09-19T00:00:00.000Z"),
         last_seen_at: new Date("2026-09-19T00:00:00.000Z"),
         updated_at: new Date("2026-09-19T00:00:00.000Z"),
@@ -35,8 +36,9 @@ function createFakeClient(initial = null) {
         if (!row) {
           row = {
             device_hash: params[0],
-            installation_count: 1,
-            used_count: 0,
+            chat_used: 0,
+            image_used: 0,
+            project_used: 0,
             first_seen_at: new Date("2026-09-19T00:00:00.000Z"),
             last_seen_at: new Date("2026-09-19T00:00:00.000Z"),
             updated_at: new Date("2026-09-19T00:00:00.000Z"),
@@ -52,8 +54,9 @@ function createFakeClient(initial = null) {
       if (sql.includes("UPDATE free_usage_devices")) {
         row = {
           ...row,
-          installation_count: params[1],
-          used_count: params[2],
+          chat_used: params[1],
+          image_used: params[2],
+          project_used: params[3],
           last_seen_at: new Date("2026-09-20T00:00:00.000Z"),
           updated_at: new Date("2026-09-20T00:00:00.000Z"),
         };
@@ -65,46 +68,71 @@ function createFakeClient(initial = null) {
   };
 }
 
-test("free usage quotas are cumulative and capped after the fifth installation", () => {
-  assert.equal(allowedTotalForInstallations(1), 5);
-  assert.equal(allowedTotalForInstallations(2), 9);
-  assert.equal(allowedTotalForInstallations(5), 15);
-  assert.equal(allowedTotalForInstallations(12), 15);
-  assert.equal(minimumUsedForInstallations(1), 0);
-  assert.equal(minimumUsedForInstallations(2), 5);
-  assert.equal(minimumUsedForInstallations(6), 15);
+test("each category has an independent allowance of ten successful uses", async () => {
+  const client = createFakeClient();
+  const result = await mergeFreeUsageState(client, {
+    deviceId: "ALLM4D1.stable-device-for-test",
+    chatUsed: 10,
+    imageUsed: 4,
+    projectUsed: 7,
+  });
+
+  assert.equal(FREE_USAGE_LIMIT, 10);
+  assert.equal(result.chat.used, 10);
+  assert.equal(result.chat.remaining, 0);
+  assert.equal(result.chat.blocked, true);
+  assert.equal(result.image.used, 4);
+  assert.equal(result.image.remaining, 6);
+  assert.equal(result.image.blocked, false);
+  assert.equal(result.project.used, 7);
+  assert.equal(result.project.remaining, 3);
+  assert.equal(result.project.blocked, false);
 });
 
-test("free usage sync is monotonic and reinstallations cannot restore consumed quota", async () => {
+test("server counters are monotonic and stale clients cannot restore free usage", async () => {
   const deviceId = "ALLM4D1.stable-device-for-test";
   const client = createFakeClient();
 
   const first = await mergeFreeUsageState(client, {
     deviceId,
-    installationCount: 1,
-    usedCount: 2,
+    chatUsed: 6,
+    imageUsed: 3,
+    projectUsed: 8,
   });
-  assert.equal(first.installation_count, 1);
-  assert.equal(first.used_count, 2);
-  assert.equal(first.remaining, 3);
-
-  const second = await mergeFreeUsageState(client, {
-    deviceId,
-    installationCount: 2,
-    usedCount: 2,
-  });
-  assert.equal(second.installation_count, 2);
-  assert.equal(second.used_count, 5);
-  assert.equal(second.allowed_total, 9);
-  assert.equal(second.remaining, 4);
+  assert.equal(first.chat_used, 6);
+  assert.equal(first.image_used, 3);
+  assert.equal(first.project_used, 8);
 
   const stale = await mergeFreeUsageState(client, {
     deviceId,
-    installationCount: 1,
-    usedCount: 0,
+    chatUsed: 0,
+    imageUsed: 1,
+    projectUsed: 2,
   });
-  assert.equal(stale.installation_count, 2);
-  assert.equal(stale.used_count, 5);
+  assert.equal(stale.chat_used, 6);
+  assert.equal(stale.image_used, 3);
+  assert.equal(stale.project_used, 8);
   assert.notEqual(client.insertedHash, deviceId);
   assert.equal(client.insertedHash.length, 64);
+});
+
+test("legacy device rows begin the v2 category counters at zero", async () => {
+  const deviceId = "ALLM4D1.legacy-device";
+  const client = createFakeClient({
+    device_hash: hashDeviceId(deviceId),
+    chat_used: undefined,
+    image_used: undefined,
+    project_used: undefined,
+  });
+
+  const result = await mergeFreeUsageState(client, {
+    deviceId,
+    chatUsed: 0,
+    imageUsed: 0,
+    projectUsed: 0,
+  });
+
+  assert.equal(result.chat.used, 0);
+  assert.equal(result.image.used, 0);
+  assert.equal(result.project.used, 0);
 });
