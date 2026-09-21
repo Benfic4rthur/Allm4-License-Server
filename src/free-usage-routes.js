@@ -21,15 +21,23 @@ function validCounter(value) {
 router.post("/free-usage/sync", async (req, res) => {
   const body = getObjectBody(req);
   const deviceId = normalizeDeviceId(body.device_id);
-  const chatUsed = body.chat_used;
-  const imageUsed = body.image_used;
-  const projectUsed = body.project_used;
+  const isV2 = body.chat_used !== undefined || body.image_used !== undefined || body.project_used !== undefined;
+  const chatUsed = isV2 ? body.chat_used : 0;
+  const imageUsed = isV2 ? body.image_used : 0;
+  const projectUsed = isV2 ? body.project_used : 0;
   const fields = {};
 
   if (!deviceId) fields.device_id = "invalid";
-  if (!validCounter(chatUsed)) fields.chat_used = "must_be_non_negative_integer";
-  if (!validCounter(imageUsed)) fields.image_used = "must_be_non_negative_integer";
-  if (!validCounter(projectUsed)) fields.project_used = "must_be_non_negative_integer";
+  if (isV2) {
+    if (!validCounter(chatUsed)) fields.chat_used = "must_be_non_negative_integer";
+    if (!validCounter(imageUsed)) fields.image_used = "must_be_non_negative_integer";
+    if (!validCounter(projectUsed)) fields.project_used = "must_be_non_negative_integer";
+  } else {
+    if (!Number.isInteger(body.installation_count) || body.installation_count < 1) {
+      fields.installation_count = "must_be_positive_integer";
+    }
+    if (!validCounter(body.used_count)) fields.used_count = "must_be_non_negative_integer";
+  }
 
   if (Object.keys(fields).length > 0) {
     return res.status(400).json({
@@ -46,6 +54,10 @@ router.post("/free-usage/sync", async (req, res) => {
       imageUsed,
       projectUsed,
     });
+    if (!isV2) {
+      freeUsage.installation_count = 1;
+      freeUsage.used_count = 0;
+    }
     return res.status(200).json({
       ok: true,
       free_usage: freeUsage,
