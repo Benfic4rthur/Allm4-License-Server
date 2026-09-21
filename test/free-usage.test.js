@@ -4,6 +4,7 @@ import {
   FREE_USAGE_LIMIT,
   mergeFreeUsageState,
 } from "../src/free-usage-service.js";
+import { hashDeviceId } from "../src/security.js";
 
 process.env.LICENSE_HASH_SECRET =
   "test-license-hash-secret-with-at-least-32-characters";
@@ -116,15 +117,16 @@ test("server counters are monotonic and stale clients cannot restore free usage"
 });
 
 test("legacy device rows begin the v2 category counters at zero", async () => {
+  const deviceId = "ALLM4D1.legacy-device";
   const client = createFakeClient({
-    device_hash: "legacy-hash",
+    device_hash: hashDeviceId(deviceId),
     chat_used: undefined,
     image_used: undefined,
     project_used: undefined,
   });
 
   const result = await mergeFreeUsageState(client, {
-    deviceId: "ALLM4D1.legacy-device",
+    deviceId,
     chatUsed: 0,
     imageUsed: 0,
     projectUsed: 0,
