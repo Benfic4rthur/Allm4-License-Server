@@ -91,3 +91,14 @@ test("only the primary-device API exposes device administration", () => {
   assert.match(routes, /maybeIssueManagementToken/);
   assert.match(routes, /setManagedDeviceBlocked/);
 });
+
+
+test("allowing a removed device restores the active slot without bypassing the limit", () => {
+  const service = read("src/license-service.js");
+
+  assert.match(service, /deactivated_at = NULL/);
+  assert.match(service, /status: blocked \? "removed" : "active"/);
+  assert.match(service, /eventType: blocked \? "deactivated" : "activated"/);
+  assert.match(service, /action: "managed_allow"/);
+  assert.match(service, /activeDevices >= license\.max_devices/);
+});
