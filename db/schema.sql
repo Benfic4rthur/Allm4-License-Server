@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS licenses (
   license_key_hash TEXT UNIQUE NOT NULL,
   status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'revoked')),
   max_devices INTEGER NOT NULL DEFAULT 3 CHECK (max_devices > 0),
+  primary_device_id UUID,
   issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   revoked_at TIMESTAMPTZ,
   revoke_reason TEXT
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS devices (
   platform TEXT,
   first_activated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  blocked_at TIMESTAMPTZ,
   deactivated_at TIMESTAMPTZ,
   UNIQUE (license_id, device_hash)
 );
@@ -46,10 +48,46 @@ CREATE TABLE IF NOT EXISTS activations (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE licenses
+  ADD COLUMN IF NOT EXISTS primary_device_id UUID;
+
+ALTER TABLE devices
+  ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ;
+
+DO $
+BEGIN
+  ALTER TABLE licenses
+    ADD CONSTRAINT licenses_primary_device_fk
+    FOREIGN KEY (primary_device_id) REFERENCES devices(id) ON DELETE SET NULL;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $;
+
+UPDATE licenses AS l
+SET primary_device_id = (
+  SELECT d.id
+  FROM devices AS d
+  WHERE d.license_id = l.id
+  ORDER BY
+    CASE WHEN d.deactivated_at IS NULL THEN 0 ELSE 1 END,
+    d.first_activated_at ASC,
+    d.id ASC
+  LIMIT 1
+)
+WHERE l.primary_device_id IS NULL
+  AND EXISTS (
+    SELECT 1
+    FROM devices AS d
+    WHERE d.license_id = l.id
+  );
+
 CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
 CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses(status);
 CREATE INDEX IF NOT EXISTS idx_devices_license_id ON devices(license_id);
 CREATE INDEX IF NOT EXISTS idx_devices_active ON devices(license_id) WHERE deactivated_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_devices_available_active
+  ON devices(license_id)
+  WHERE deactivated_at IS NULL AND blocked_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_activations_license_id ON activations(license_id);
 CREATE INDEX IF NOT EXISTS idx_activations_created_at ON activations(created_at DESC);
 
