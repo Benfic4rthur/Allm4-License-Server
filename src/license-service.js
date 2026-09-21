@@ -89,14 +89,14 @@ async function ensureDeviceManagementSchema() {
          ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`,
       );
       await client.query(
-        `DO $
+        `DO $allm4$
          BEGIN
            ALTER TABLE licenses
              ADD CONSTRAINT licenses_primary_device_fk
              FOREIGN KEY (primary_device_id) REFERENCES devices(id) ON DELETE SET NULL;
          EXCEPTION
            WHEN duplicate_object THEN NULL;
-         END $;`,
+         END $allm4$;`,
       );
       await client.query(
         `UPDATE licenses AS l
@@ -106,8 +106,9 @@ async function ensureDeviceManagementSchema() {
            WHERE d.license_id = l.id
            ORDER BY
              CASE WHEN d.deactivated_at IS NULL THEN 0 ELSE 1 END,
-             d.first_activated_at ASC,
-             d.id ASC
+             d.last_seen_at DESC,
+             d.first_activated_at DESC,
+             d.id DESC
            LIMIT 1
          )
          WHERE l.primary_device_id IS NULL
