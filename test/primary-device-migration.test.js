@@ -24,7 +24,7 @@ test("primary device schema migration uses a valid PostgreSQL dollar quote", () 
   assert.doesNotMatch(service, /DO \$\n/);
 });
 
-test("existing license migration prefers the most recently seen active device", () => {
+test("unassigned license fallback prefers the most recently seen active device", () => {
   const schema = read("db/schema.sql");
   const service = read("src/license-service.js");
 
@@ -32,5 +32,18 @@ test("existing license migration prefers the most recently seen active device", 
     assert.match(source, /CASE WHEN d\.deactivated_at IS NULL THEN 0 ELSE 1 END/);
     assert.match(source, /d\.last_seen_at DESC/);
     assert.match(source, /d\.first_activated_at DESC/);
+  }
+});
+
+
+test("purchased licenses are repaired once from the original activation", () => {
+  const schema = read("db/schema.sql");
+  const service = read("src/license-service.js");
+
+  for (const source of [schema, service]) {
+    assert.match(source, /primary-device-purchase-origin-v2/);
+    assert.match(source, /a\.event_type = 'activated'/);
+    assert.match(source, /ORDER BY a\.created_at ASC/);
+    assert.match(source, /l\.purchase_id IS NOT NULL/);
   }
 });

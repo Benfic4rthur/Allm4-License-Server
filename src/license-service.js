@@ -99,6 +99,49 @@ async function ensureDeviceManagementSchema() {
          END $allm4$;`,
       );
       await client.query(
+        `CREATE TABLE IF NOT EXISTS license_schema_migrations (
+           key TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`,
+      );
+      await client.query(
+        `WITH migration AS (
+           INSERT INTO license_schema_migrations (key)
+           VALUES ('primary-device-purchase-origin-v2')
+           ON CONFLICT (key) DO NOTHING
+           RETURNING key
+         )
+         UPDATE licenses AS l
+         SET primary_device_id = COALESCE(
+           (
+             SELECT a.device_id
+             FROM activations AS a
+             JOIN devices AS d
+               ON d.id = a.device_id
+              AND d.license_id = l.id
+             WHERE a.license_id = l.id
+               AND a.event_type = 'activated'
+               AND a.device_id IS NOT NULL
+             ORDER BY a.created_at ASC
+             LIMIT 1
+           ),
+           (
+             SELECT d.id
+             FROM devices AS d
+             WHERE d.license_id = l.id
+             ORDER BY d.first_activated_at ASC, d.id ASC
+             LIMIT 1
+           )
+         )
+         WHERE l.purchase_id IS NOT NULL
+           AND EXISTS (SELECT 1 FROM migration)
+           AND EXISTS (
+             SELECT 1
+             FROM devices AS d
+             WHERE d.license_id = l.id
+           )`,
+      );
+      await client.query(
         `UPDATE licenses AS l
          SET primary_device_id = (
            SELECT d.id
