@@ -58,14 +58,18 @@ test("management token is bound to the primary device and license", () => {
   );
 });
 
-test("schema migrates existing licenses to the most recently seen active device and supports managed removal", () => {
+test("schema repairs purchased licenses from their original activation and supports managed removal", () => {
   const schema = read("db/schema.sql");
 
   assert.match(schema, /primary_device_id UUID/);
   assert.match(schema, /blocked_at TIMESTAMPTZ/);
+  assert.match(schema, /license_schema_migrations/);
+  assert.match(schema, /primary-device-purchase-origin-v2/);
+  assert.match(schema, /a\.event_type = 'activated'/);
+  assert.match(schema, /ORDER BY a\.created_at ASC/);
+  assert.match(schema, /d\.first_activated_at ASC/);
+  assert.match(schema, /l\.purchase_id IS NOT NULL/);
   assert.match(schema, /WHERE l\.primary_device_id IS NULL/);
-  assert.match(schema, /last_seen_at DESC/);
-  assert.match(schema, /first_activated_at DESC/);
   assert.match(schema, /licenses_primary_device_fk/);
 });
 
