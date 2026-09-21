@@ -4,10 +4,15 @@ import {
   deactivateLicense,
   issueLicense,
   LicenseServiceError,
+  listManagedDevices,
   revokeLicense,
+  setManagedDeviceBlocked,
   validateLicense,
 } from "./license-service.js";
-import { maybeIssueOfflineLicenseToken } from "./license-token.js";
+import {
+  maybeIssueManagementToken,
+  maybeIssueOfflineLicenseToken,
+} from "./license-token.js";
 import {
   normalizeDeviceId,
   normalizeLicenseKey,
@@ -83,6 +88,38 @@ function parseDeviceRequest(req) {
   };
 }
 
+function parseManagementRequest(req) {
+  const body = getObjectBody(req);
+  const licenseKey = normalizeLicenseKey(body.license_key);
+  const deviceId = normalizeDeviceId(body.device_id);
+  const managementToken =
+    typeof body.management_token === "string" ? body.management_token.trim() : "";
+  const fields = {};
+
+  if (!licenseKey) {
+    fields.license_key = "invalid";
+  }
+  if (!deviceId) {
+    fields.device_id = "invalid";
+  }
+  if (!managementToken || managementToken.length > 4096) {
+    fields.management_token = "invalid";
+  }
+
+  if (Object.keys(fields).length > 0) {
+    return { error: fields };
+  }
+
+  return {
+    value: {
+      licenseKey,
+      deviceId,
+      managementToken,
+      requestIp: getRequestIp(req),
+    },
+  };
+}
+
 function getRequestIp(req) {
   const forwarded = req.headers["x-forwarded-for"];
   if (typeof forwarded === "string" && forwarded.trim()) {
@@ -126,17 +163,26 @@ function requireAdmin(req, res, next) {
   }
 }
 
-function attachOfflineLicense(result, deviceId) {
-  const token = maybeIssueOfflineLicenseToken({
+function attachLicenseAccess(result, deviceId) {
+  const offlineToken = maybeIssueOfflineLicenseToken({
     licenseId: result.license.id,
     deviceId,
     licenseIssuedAt: result.license.issued_at,
   });
+  const isPrimaryDevice = result.is_primary_device === true;
+  const managementToken = isPrimaryDevice
+    ? maybeIssueManagementToken({
+        licenseId: result.license.id,
+        deviceId,
+      })
+    : null;
 
   return {
     ...result,
-    offline_ready: Boolean(token),
-    offline_token: token,
+    offline_ready: Boolean(offlineToken),
+    offline_token: offlineToken,
+    is_primary_device: isPrimaryDevice,
+    management_token: managementToken,
   };
 }
 
@@ -247,7 +293,7 @@ router.post("/licenses/activate", async (req, res) => {
     const activated = await activateLicense(parsed.value);
     return res.status(200).json({
       ok: true,
-      ...attachOfflineLicense(activated, parsed.value.deviceId),
+      ...attachLicenseAccess(activated, parsed.value.deviceId),
     });
   } catch (error) {
     return sendError(res, error);
@@ -268,7 +314,94 @@ router.post("/licenses/validate", async (req, res) => {
     const validated = await validateLicense(parsed.value);
     return res.status(200).json({
       ok: true,
-      ...attachOfflineLicense(validated, parsed.value.deviceId),
+      ...attachLicenseAccess(validated, parsed.value.deviceId),
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/licenses/devices", async (req, res) => {
+  try {
+    const parsed = parseManagementRequest(req);
+    if (parsed.error) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        fields: parsed.error,
+      });
+    }
+
+    const devices = await listManagedDevices(parsed.value);
+    return res.status(200).json({
+      ok: true,
+      ...devices,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/licenses/devices/:deviceId/deactivate", async (req, res) => {
+  try {
+    if (!UUID_PATTERN.test(req.params.deviceId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        fields: { device_id: "invalid" },
+      });
+    }
+
+    const parsed = parseManagementRequest(req);
+    if (parsed.error) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        fields: parsed.error,
+      });
+    }
+
+    const result = await setManagedDeviceBlocked({
+      ...parsed.value,
+      targetDeviceId: req.params.deviceId,
+      blocked: true,
+    });
+    return res.status(200).json({
+      ok: true,
+      ...result,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/licenses/devices/:deviceId/allow", async (req, res) => {
+  try {
+    if (!UUID_PATTERN.test(req.params.deviceId)) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        fields: { device_id: "invalid" },
+      });
+    }
+
+    const parsed = parseManagementRequest(req);
+    if (parsed.error) {
+      return res.status(400).json({
+        ok: false,
+        error: "invalid_request",
+        fields: parsed.error,
+      });
+    }
+
+    const result = await setManagedDeviceBlocked({
+      ...parsed.value,
+      targetDeviceId: req.params.deviceId,
+      blocked: false,
+    });
+    return res.status(200).json({
+      ok: true,
+      ...result,
     });
   } catch (error) {
     return sendError(res, error);
