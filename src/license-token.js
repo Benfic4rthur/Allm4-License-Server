@@ -8,6 +8,7 @@ import {
 import { normalizeDeviceId, SecurityConfigurationError } from "./security.js";
 
 const TOKEN_PREFIX = "ALLM4L1";
+const MANAGEMENT_TOKEN_PREFIX = "ALLM4M1";
 const TOKEN_ISSUER = "allm4-license-server";
 const TOKEN_KEY_ID = "primary-v1";
 const TOKEN_VERSION = 1;
@@ -192,9 +193,114 @@ export function verifyOfflineLicenseToken(token, { deviceId } = {}) {
   };
 }
 
+export function issueManagementToken({
+  licenseId,
+  deviceId,
+  issuedAt = new Date(),
+}) {
+  if (typeof licenseId !== "string" || !licenseId.trim()) {
+    throw new TypeError("Invalid license id");
+  }
+
+  const payload = {
+    v: TOKEN_VERSION,
+    iss: TOKEN_ISSUER,
+    kid: TOKEN_KEY_ID,
+    scope: "device_management",
+    license_id: licenseId,
+    device_binding: createDeviceBinding(deviceId),
+    issued_at: new Date(issuedAt).toISOString(),
+  };
+
+  const encodedPayload = encodeBase64Url(JSON.stringify(payload));
+  const signingInput = `${MANAGEMENT_TOKEN_PREFIX}.${encodedPayload}`;
+  const signature = sign(null, Buffer.from(signingInput, "utf8"), getPrivateKey());
+
+  return `${signingInput}.${encodeBase64Url(signature)}`;
+}
+
+export function verifyManagementToken(
+  token,
+  { licenseId = undefined, deviceId = undefined } = {},
+) {
+  if (typeof token !== "string") {
+    return { valid: false, error: "invalid_token" };
+  }
+
+  const parts = token.trim().split(".");
+  if (parts.length !== 3 || parts[0] !== MANAGEMENT_TOKEN_PREFIX) {
+    return { valid: false, error: "invalid_token" };
+  }
+
+  const [, encodedPayload, encodedSignature] = parts;
+  const payload = parsePayload(encodedPayload);
+  if (!payload) {
+    return { valid: false, error: "invalid_payload" };
+  }
+
+  const signingInput = `${MANAGEMENT_TOKEN_PREFIX}.${encodedPayload}`;
+  let signatureValid = false;
+
+  try {
+    signatureValid = verify(
+      null,
+      Buffer.from(signingInput, "utf8"),
+      getPublicKey(),
+      decodeBase64Url(encodedSignature),
+    );
+  } catch {
+    return { valid: false, error: "invalid_signature" };
+  }
+
+  if (!signatureValid) {
+    return { valid: false, error: "invalid_signature" };
+  }
+
+  if (
+    payload.v !== TOKEN_VERSION ||
+    payload.iss !== TOKEN_ISSUER ||
+    payload.kid !== TOKEN_KEY_ID ||
+    payload.scope !== "device_management" ||
+    typeof payload.license_id !== "string" ||
+    typeof payload.device_binding !== "string" ||
+    typeof payload.issued_at !== "string"
+  ) {
+    return { valid: false, error: "invalid_claims" };
+  }
+
+  if (licenseId !== undefined && payload.license_id !== licenseId) {
+    return { valid: false, error: "license_mismatch" };
+  }
+
+  if (deviceId !== undefined) {
+    let expectedBinding;
+    try {
+      expectedBinding = createDeviceBinding(deviceId);
+    } catch {
+      return { valid: false, error: "device_mismatch" };
+    }
+
+    if (payload.device_binding !== expectedBinding) {
+      return { valid: false, error: "device_mismatch" };
+    }
+  }
+
+  return {
+    valid: true,
+    payload,
+  };
+}
+
 export function maybeIssueOfflineLicenseToken(input) {
   if (!isOfflineSigningConfigured()) {
     return null;
   }
   return issueOfflineLicenseToken(input);
+}
+
+export function maybeIssueManagementToken(input) {
+  if (!isOfflineSigningConfigured()) {
+    return null;
+  }
+  return issueManagementToken(input);
 }

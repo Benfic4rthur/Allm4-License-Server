@@ -5,6 +5,7 @@ import {
   hashLicenseKey,
   hashRequestIp,
 } from "./security.js";
+import { verifyManagementToken } from "./license-token.js";
 
 export class LicenseServiceError extends Error {
   constructor(code, status, details = undefined) {
@@ -34,6 +35,7 @@ function mapDevice(row) {
     platform: row.platform ?? null,
     first_activated_at: row.first_activated_at,
     last_seen_at: row.last_seen_at,
+    blocked_at: row.blocked_at ?? null,
     deactivated_at: row.deactivated_at ?? null,
   };
 }
@@ -65,11 +67,87 @@ async function countActiveDevices(client, licenseId) {
     `SELECT COUNT(*)::int AS count
      FROM devices
      WHERE license_id = $1
-       AND deactivated_at IS NULL`,
+       AND deactivated_at IS NULL
+       AND blocked_at IS NULL`,
     [licenseId],
   );
 
   return result.rows[0]?.count ?? 0;
+}
+
+let managementSchemaReady = null;
+
+async function ensureDeviceManagementSchema() {
+  if (!managementSchemaReady) {
+    managementSchemaReady = withTransaction(async (client) => {
+      await client.query(
+        `ALTER TABLE licenses
+         ADD COLUMN IF NOT EXISTS primary_device_id UUID`,
+      );
+      await client.query(
+        `ALTER TABLE devices
+         ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`,
+      );
+      await client.query(
+        `DO $
+         BEGIN
+           ALTER TABLE licenses
+             ADD CONSTRAINT licenses_primary_device_fk
+             FOREIGN KEY (primary_device_id) REFERENCES devices(id) ON DELETE SET NULL;
+         EXCEPTION
+           WHEN duplicate_object THEN NULL;
+         END $;`,
+      );
+      await client.query(
+        `UPDATE licenses AS l
+         SET primary_device_id = (
+           SELECT d.id
+           FROM devices AS d
+           WHERE d.license_id = l.id
+           ORDER BY
+             CASE WHEN d.deactivated_at IS NULL THEN 0 ELSE 1 END,
+             d.first_activated_at ASC,
+             d.id ASC
+           LIMIT 1
+         )
+         WHERE l.primary_device_id IS NULL
+           AND EXISTS (
+             SELECT 1
+             FROM devices AS d
+             WHERE d.license_id = l.id
+           )`,
+      );
+      await client.query(
+        `CREATE INDEX IF NOT EXISTS idx_devices_available_active
+         ON devices(license_id)
+         WHERE deactivated_at IS NULL AND blocked_at IS NULL`,
+      );
+    }).catch((error) => {
+      managementSchemaReady = null;
+      throw error;
+    });
+  }
+
+  return managementSchemaReady;
+}
+
+async function claimPrimaryDevice(client, license, deviceId) {
+  if (license.primary_device_id) {
+    return license.primary_device_id;
+  }
+
+  const claimed = await client.query(
+    `UPDATE licenses
+     SET primary_device_id = $2
+     WHERE id = $1
+       AND primary_device_id IS NULL
+     RETURNING primary_device_id`,
+    [license.id, deviceId],
+  );
+
+  const primaryDeviceId = claimed.rows[0]?.primary_device_id ?? deviceId;
+  license.primary_device_id = primaryDeviceId;
+  return primaryDeviceId;
 }
 
 async function businessFailure(
@@ -141,13 +219,14 @@ export async function activateLicense({
   platform = null,
   requestIp = null,
 }) {
+  await ensureDeviceManagementSchema();
   const licenseHash = hashLicenseKey(licenseKey);
   const deviceHash = hashDeviceId(deviceId);
   const ipHash = hashRequestIp(requestIp);
 
   const result = await withTransaction(async (client) => {
     const licenseResult = await client.query(
-      `SELECT id, status, max_devices, issued_at, revoked_at, revoke_reason
+      `SELECT id, status, max_devices, primary_device_id, issued_at, revoked_at, revoke_reason
        FROM licenses
        WHERE license_key_hash = $1
        FOR UPDATE`,
@@ -176,7 +255,7 @@ export async function activateLicense({
     }
 
     const deviceResult = await client.query(
-      `SELECT id, device_name, platform, first_activated_at, last_seen_at, deactivated_at
+      `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
        FROM devices
        WHERE license_id = $1
          AND device_hash = $2
@@ -187,6 +266,17 @@ export async function activateLicense({
     let device = deviceResult.rows[0];
     let activationState = "activated";
 
+    if (device?.blocked_at) {
+      return businessFailure(client, {
+        code: "device_removed_by_primary",
+        status: 403,
+        licenseId: license.id,
+        deviceId: device.id,
+        ipHash,
+        metadata: { action: "activate", reason: "device_removed_by_primary" },
+      });
+    }
+
     if (device && !device.deactivated_at) {
       const updated = await client.query(
         `UPDATE devices
@@ -195,7 +285,7 @@ export async function activateLicense({
              platform = COALESCE($4, platform)
          WHERE license_id = $1
            AND device_hash = $2
-         RETURNING id, device_name, platform, first_activated_at, last_seen_at, deactivated_at`,
+         RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
         [license.id, deviceHash, deviceName, platform],
       );
 
@@ -240,7 +330,7 @@ export async function activateLicense({
                platform = COALESCE($4, platform)
            WHERE license_id = $1
              AND device_hash = $2
-           RETURNING id, device_name, platform, first_activated_at, last_seen_at, deactivated_at`,
+           RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
           [license.id, deviceHash, deviceName, platform],
         );
         device = reactivated.rows[0];
@@ -249,7 +339,7 @@ export async function activateLicense({
         const inserted = await client.query(
           `INSERT INTO devices (license_id, device_hash, device_name, platform)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, device_name, platform, first_activated_at, last_seen_at, deactivated_at`,
+           RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
           [license.id, deviceHash, deviceName, platform],
         );
         device = inserted.rows[0];
@@ -264,12 +354,15 @@ export async function activateLicense({
       });
     }
 
+    const primaryDeviceId = await claimPrimaryDevice(client, license, device.id);
+
     return {
       ok: true,
       value: {
         license: mapLicense(license),
         device: mapDevice(device),
         activation_state: activationState,
+        is_primary_device: primaryDeviceId === device.id,
       },
     };
   });
@@ -284,13 +377,14 @@ export async function validateLicense({
   platform = null,
   requestIp = null,
 }) {
+  await ensureDeviceManagementSchema();
   const licenseHash = hashLicenseKey(licenseKey);
   const deviceHash = hashDeviceId(deviceId);
   const ipHash = hashRequestIp(requestIp);
 
   const result = await withTransaction(async (client) => {
     const licenseResult = await client.query(
-      `SELECT id, status, max_devices, issued_at, revoked_at, revoke_reason
+      `SELECT id, status, max_devices, primary_device_id, issued_at, revoked_at, revoke_reason
        FROM licenses
        WHERE license_key_hash = $1
        FOR SHARE`,
@@ -319,7 +413,7 @@ export async function validateLicense({
     }
 
     const deviceResult = await client.query(
-      `SELECT id, device_name, platform, first_activated_at, last_seen_at, deactivated_at
+      `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
        FROM devices
        WHERE license_id = $1
          AND device_hash = $2
@@ -328,6 +422,17 @@ export async function validateLicense({
     );
 
     const device = deviceResult.rows[0];
+    if (device?.blocked_at) {
+      return businessFailure(client, {
+        code: "device_removed_by_primary",
+        status: 403,
+        licenseId: license.id,
+        deviceId: device.id,
+        ipHash,
+        metadata: { action: "validate", reason: "device_removed_by_primary" },
+      });
+    }
+
     if (!device || device.deactivated_at) {
       return businessFailure(client, {
         code: "device_not_active",
@@ -346,7 +451,7 @@ export async function validateLicense({
            platform = COALESCE($4, platform)
        WHERE license_id = $1
          AND device_hash = $2
-       RETURNING id, device_name, platform, first_activated_at, last_seen_at, deactivated_at`,
+       RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
       [license.id, deviceHash, deviceName, platform],
     );
 
@@ -358,12 +463,15 @@ export async function validateLicense({
       metadata: { action: "validate" },
     });
 
+    const primaryDeviceId = await claimPrimaryDevice(client, license, updated.rows[0].id);
+
     return {
       ok: true,
       value: {
         valid: true,
         license: mapLicense(license),
         device: mapDevice(updated.rows[0]),
+        is_primary_device: primaryDeviceId === updated.rows[0].id,
       },
     };
   });
@@ -376,13 +484,14 @@ export async function deactivateLicense({
   deviceId,
   requestIp = null,
 }) {
+  await ensureDeviceManagementSchema();
   const licenseHash = hashLicenseKey(licenseKey);
   const deviceHash = hashDeviceId(deviceId);
   const ipHash = hashRequestIp(requestIp);
 
   const result = await withTransaction(async (client) => {
     const licenseResult = await client.query(
-      `SELECT id, status, max_devices, issued_at, revoked_at, revoke_reason
+      `SELECT id, status, max_devices, primary_device_id, issued_at, revoked_at, revoke_reason
        FROM licenses
        WHERE license_key_hash = $1
        FOR SHARE`,
@@ -411,7 +520,7 @@ export async function deactivateLicense({
     }
 
     const deviceResult = await client.query(
-      `SELECT id, device_name, platform, first_activated_at, last_seen_at, deactivated_at
+      `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
        FROM devices
        WHERE license_id = $1
          AND device_hash = $2
@@ -427,6 +536,17 @@ export async function deactivateLicense({
         licenseId: license.id,
         ipHash,
         metadata: { action: "deactivate", reason: "device_not_found" },
+      });
+    }
+
+    if (device.id === license.primary_device_id) {
+      return businessFailure(client, {
+        code: "primary_device_cannot_deactivate_self",
+        status: 409,
+        licenseId: license.id,
+        deviceId: device.id,
+        ipHash,
+        metadata: { action: "deactivate", reason: "primary_device" },
       });
     }
 
@@ -455,7 +575,7 @@ export async function deactivateLicense({
        SET deactivated_at = NOW(),
            last_seen_at = NOW()
        WHERE id = $1
-       RETURNING id, device_name, platform, first_activated_at, last_seen_at, deactivated_at`,
+       RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
       [device.id],
     );
 
@@ -474,6 +594,246 @@ export async function deactivateLicense({
         already_deactivated: false,
         license: mapLicense(license),
         device: mapDevice(updated.rows[0]),
+      },
+    };
+  });
+
+  return unwrap(result);
+}
+
+
+async function authorizePrimaryManagement(
+  client,
+  { licenseKey, deviceId, managementToken, requestIp = null },
+) {
+  const licenseHash = hashLicenseKey(licenseKey);
+  const deviceHash = hashDeviceId(deviceId);
+  const ipHash = hashRequestIp(requestIp);
+
+  const licenseResult = await client.query(
+    `SELECT id, status, max_devices, primary_device_id, issued_at, revoked_at, revoke_reason
+     FROM licenses
+     WHERE license_key_hash = $1
+     FOR SHARE`,
+    [licenseHash],
+  );
+  const license = licenseResult.rows[0];
+
+  if (!license) {
+    return businessFailure(client, {
+      code: "license_not_found",
+      status: 404,
+      ipHash,
+      metadata: { action: "manage_devices", reason: "license_not_found" },
+    });
+  }
+
+  if (license.status !== "active") {
+    return businessFailure(client, {
+      code: "license_revoked",
+      status: 403,
+      licenseId: license.id,
+      eventType: "revoked",
+      ipHash,
+      metadata: { action: "manage_devices", reason: "license_revoked" },
+    });
+  }
+
+  const deviceResult = await client.query(
+    `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
+     FROM devices
+     WHERE license_id = $1
+       AND device_hash = $2
+     FOR SHARE`,
+    [license.id, deviceHash],
+  );
+  const device = deviceResult.rows[0];
+
+  if (
+    !device ||
+    device.deactivated_at ||
+    device.blocked_at ||
+    device.id !== license.primary_device_id
+  ) {
+    return businessFailure(client, {
+      code: "primary_device_required",
+      status: 403,
+      licenseId: license.id,
+      deviceId: device?.id ?? null,
+      ipHash,
+      metadata: { action: "manage_devices", reason: "primary_device_required" },
+    });
+  }
+
+  const token = verifyManagementToken(managementToken, {
+    licenseId: license.id,
+    deviceId,
+  });
+  if (!token.valid) {
+    return businessFailure(client, {
+      code: "invalid_management_token",
+      status: 403,
+      licenseId: license.id,
+      deviceId: device.id,
+      ipHash,
+      metadata: {
+        action: "manage_devices",
+        reason: "invalid_management_token",
+        token_error: token.error,
+      },
+    });
+  }
+
+  return {
+    ok: true,
+    value: { license, device, ipHash },
+  };
+}
+
+export async function listManagedDevices({
+  licenseKey,
+  deviceId,
+  managementToken,
+  requestIp = null,
+}) {
+  await ensureDeviceManagementSchema();
+
+  const result = await withTransaction(async (client) => {
+    const authorized = await authorizePrimaryManagement(client, {
+      licenseKey,
+      deviceId,
+      managementToken,
+      requestIp,
+    });
+    if (!authorized.ok) return authorized;
+
+    const { license, device } = authorized.value;
+    const devices = await client.query(
+      `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
+       FROM devices
+       WHERE license_id = $1
+       ORDER BY
+         CASE WHEN id = $2 THEN 0 ELSE 1 END,
+         first_activated_at ASC,
+         id ASC`,
+      [license.id, device.id],
+    );
+
+    return {
+      ok: true,
+      value: {
+        max_devices: license.max_devices,
+        active_devices: await countActiveDevices(client, license.id),
+        devices: devices.rows.map((row) => ({
+          ...mapDevice(row),
+          is_primary: row.id === license.primary_device_id,
+          is_current: row.id === device.id,
+          status: row.blocked_at
+            ? "removed"
+            : row.deactivated_at
+              ? "inactive"
+              : "active",
+        })),
+      },
+    };
+  });
+
+  return unwrap(result);
+}
+
+export async function setManagedDeviceBlocked({
+  licenseKey,
+  deviceId,
+  managementToken,
+  targetDeviceId,
+  blocked,
+  requestIp = null,
+}) {
+  await ensureDeviceManagementSchema();
+
+  const result = await withTransaction(async (client) => {
+    const authorized = await authorizePrimaryManagement(client, {
+      licenseKey,
+      deviceId,
+      managementToken,
+      requestIp,
+    });
+    if (!authorized.ok) return authorized;
+
+    const { license, device: primaryDevice, ipHash } = authorized.value;
+    const targetResult = await client.query(
+      `SELECT id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at
+       FROM devices
+       WHERE license_id = $1
+         AND id = $2
+       FOR UPDATE`,
+      [license.id, targetDeviceId],
+    );
+    const target = targetResult.rows[0];
+
+    if (!target) {
+      return businessFailure(client, {
+        code: "device_not_found",
+        status: 404,
+        licenseId: license.id,
+        deviceId: primaryDevice.id,
+        ipHash,
+        metadata: { action: "manage_devices", reason: "device_not_found" },
+      });
+    }
+
+    if (target.id === license.primary_device_id) {
+      return businessFailure(client, {
+        code: "primary_device_cannot_be_removed",
+        status: 409,
+        licenseId: license.id,
+        deviceId: primaryDevice.id,
+        ipHash,
+        metadata: { action: "manage_devices", reason: "primary_device_target" },
+      });
+    }
+
+    const updated = blocked
+      ? await client.query(
+          `UPDATE devices
+           SET blocked_at = COALESCE(blocked_at, NOW()),
+               deactivated_at = COALESCE(deactivated_at, NOW()),
+               last_seen_at = NOW()
+           WHERE id = $1
+           RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
+          [target.id],
+        )
+      : await client.query(
+          `UPDATE devices
+           SET blocked_at = NULL,
+               last_seen_at = NOW()
+           WHERE id = $1
+           RETURNING id, device_name, platform, first_activated_at, last_seen_at, blocked_at, deactivated_at`,
+          [target.id],
+        );
+
+    await recordActivation(client, {
+      licenseId: license.id,
+      deviceId: target.id,
+      eventType: blocked ? "deactivated" : "validated",
+      ipHash,
+      metadata: {
+        action: blocked ? "managed_remove" : "managed_allow",
+        primary_device_id: primaryDevice.id,
+      },
+    });
+
+    return {
+      ok: true,
+      value: {
+        device: {
+          ...mapDevice(updated.rows[0]),
+          is_primary: false,
+          is_current: false,
+          status: blocked ? "removed" : "inactive",
+        },
+        max_devices: license.max_devices,
+        active_devices: await countActiveDevices(client, license.id),
       },
     };
   });
