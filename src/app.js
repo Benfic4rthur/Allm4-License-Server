@@ -3,6 +3,7 @@ import helmet from "helmet";
 import { checkDatabaseConnection } from "./db.js";
 import licenseRouter from "./license-routes.js";
 import purchaseRouter from "./purchase-routes.js";
+import couponAdminRouter from "./coupon-admin-routes.js";
 import webhookRouter from "./webhook-routes.js";
 import bugRouter from "./bug-routes.js";
 import freeUsageRouter from "./free-usage-routes.js";
@@ -47,6 +48,7 @@ app.get("/api/health/db", async (_req, res) => {
 
 app.use("/api", licenseRouter);
 app.use("/api", purchaseRouter);
+app.use("/api", couponAdminRouter);
 app.use("/api", webhookRouter);
 app.use("/api", bugRouter);
 app.use("/api", freeUsageRouter);
