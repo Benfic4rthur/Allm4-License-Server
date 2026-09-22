@@ -44,6 +44,18 @@ ALTER TABLE purchases
 ALTER TABLE purchases
   ADD COLUMN IF NOT EXISTS discount_amount_cents INTEGER NOT NULL DEFAULT 0;
 
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS provider_transaction_id TEXT;
+
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS provider_fee_cents INTEGER;
+
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS net_received_amount_cents INTEGER;
+
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS provider_financial_updated_at TIMESTAMPTZ;
+
 UPDATE purchases
 SET original_amount_cents = amount_cents
 WHERE original_amount_cents IS NULL;
@@ -106,6 +118,11 @@ CREATE TABLE IF NOT EXISTS coupon_redemptions (
 
 CREATE INDEX IF NOT EXISTS idx_purchases_coupon_id
   ON purchases(coupon_id);
+CREATE INDEX IF NOT EXISTS idx_purchases_paid_at
+  ON purchases(paid_at DESC);
+CREATE INDEX IF NOT EXISTS idx_purchases_provider_transaction_id
+  ON purchases(provider_transaction_id)
+  WHERE provider_transaction_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_coupon_redemptions_coupon_status
   ON coupon_redemptions(coupon_id, status);
 CREATE INDEX IF NOT EXISTS idx_coupon_redemptions_coupon_email
