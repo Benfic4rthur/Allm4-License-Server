@@ -1,6 +1,8 @@
 import { withTransaction } from "./db.js";
 
 const BOOTSTRAP_KEY = "archive-prelaunch-test-history-2026-09-22-v1";
+const LEGACY_FINANCE_RESOLUTION_KEY =
+  "resolve-preserved-legacy-finance-2026-09-22-v1";
 const BOOTSTRAP_CUTOFF = "2026-09-22T23:16:00.000Z";
 
 let adminVisibilityReady = null;
@@ -10,6 +12,9 @@ export async function ensureAdminVisibilityStorage() {
     adminVisibilityReady = withTransaction(async (client) => {
       await client.query(
         "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS admin_archived_at TIMESTAMPTZ",
+      );
+      await client.query(
+        "ALTER TABLE purchases ADD COLUMN IF NOT EXISTS admin_financial_resolved_at TIMESTAMPTZ",
       );
       await client.query(
         "ALTER TABLE licenses ADD COLUMN IF NOT EXISTS admin_archived_at TIMESTAMPTZ",
@@ -24,6 +29,9 @@ export async function ensureAdminVisibilityStorage() {
       );
       await client.query(
         "CREATE INDEX IF NOT EXISTS idx_purchases_admin_archived_at ON purchases(admin_archived_at)",
+      );
+      await client.query(
+        "CREATE INDEX IF NOT EXISTS idx_purchases_admin_financial_resolved_at ON purchases(admin_financial_resolved_at)",
       );
       await client.query(
         "CREATE INDEX IF NOT EXISTS idx_licenses_admin_archived_at ON licenses(admin_archived_at)",
@@ -86,6 +94,46 @@ export async function ensureAdminVisibilityStorage() {
             "  )",
           ].join("\n"),
           [BOOTSTRAP_CUTOFF],
+        );
+      }
+
+      const financeClaimed = await client.query(
+        [
+          "INSERT INTO admin_visibility_migrations (key)",
+          "VALUES ($1)",
+          "ON CONFLICT (key) DO NOTHING",
+          "RETURNING key",
+        ].join("\n"),
+        [LEGACY_FINANCE_RESOLUTION_KEY],
+      );
+
+      if (financeClaimed.rowCount > 0) {
+        await client.query(
+          [
+            "UPDATE purchases",
+            "SET admin_financial_resolved_at = NOW(),",
+            "    updated_at = NOW()",
+            "WHERE admin_archived_at IS NULL",
+            "  AND admin_financial_resolved_at IS NULL",
+            "  AND provider = 'mercado_pago'",
+            "  AND status = 'approved'",
+            "  AND net_received_amount_cents IS NULL",
+            "  AND (",
+            "    (",
+            "      LOWER(COALESCE(payer_email, '')) = 'natacha-inacio@hotmail.com'",
+            "      AND amount_cents = 4999",
+            "      AND DATE_TRUNC('minute', COALESCE(paid_at, created_at) AT TIME ZONE 'America/Sao_Paulo') = TIMESTAMP '2026-09-21 00:25:00'",
+            "    )",
+            "    OR (",
+            "      LOWER(COALESCE(payer_email, '')) = 'arthur_benfica@hotmail.com'",
+            "      AND amount_cents = 999",
+            "      AND DATE_TRUNC('minute', COALESCE(paid_at, created_at) AT TIME ZONE 'America/Sao_Paulo') IN (",
+            "        TIMESTAMP '2026-09-15 18:11:00',",
+            "        TIMESTAMP '2026-09-15 18:16:00'",
+            "      )",
+            "    )",
+            "  )",
+          ].join("\n"),
         );
       }
     }).catch((error) => {
