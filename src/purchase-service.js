@@ -1,11 +1,18 @@
 import { ensureCouponStorage } from "./coupon-schema.js";
 import { getPool, withTransaction } from "./db.js";
+import { ensureFinanceStorage } from "./finance-schema.js";
 import {
   finalizeCouponRedemption,
   lockCouponForPurchase,
   recordCouponRedemption,
 } from "./coupon-service.js";
-import { createPixOrder, extractPixDetails } from "./mercado-pago.js";
+import {
+  createPixOrder,
+  extractMercadoPagoOrderPaymentId,
+  extractPixDetails,
+  getMercadoPagoPayment,
+  inspectMercadoPagoPaymentFinancials,
+} from "./mercado-pago.js";
 import { ensurePurchaseLicense } from "./purchase-license-service.js";
 import {
   derivePurchaseLicenseKey,
@@ -26,6 +33,16 @@ function mapPurchase(row) {
     id: row.id,
     provider: row.provider,
     provider_payment_id: row.provider_payment_id ?? null,
+    provider_transaction_id: row.provider_transaction_id ?? null,
+    provider_fee_cents:
+      row.provider_fee_cents === null || row.provider_fee_cents === undefined
+        ? null
+        : Number(row.provider_fee_cents),
+    net_received_amount_cents:
+      row.net_received_amount_cents === null ||
+      row.net_received_amount_cents === undefined
+        ? null
+        : Number(row.net_received_amount_cents),
     payer_email: row.payer_email ?? null,
     coupon_code: row.coupon_code ?? null,
     original_amount_cents: row.original_amount_cents ?? row.amount_cents,
@@ -111,6 +128,7 @@ export async function createPixPurchase({
   fetchImpl = fetch,
 }) {
   await ensureCouponStorage();
+  await ensureFinanceStorage();
   const prepared = await withTransaction(async (client) => {
     let coupon = null;
     let pricing = {
@@ -267,16 +285,48 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
   return { ok: true, purchase };
 }
 
-export async function syncMercadoPagoPurchaseFromOrder(order) {
+export async function syncMercadoPagoPurchaseFromOrder(
+  order,
+  { fetchPayment = getMercadoPagoPayment } = {},
+) {
   await ensureCouponStorage();
+  await ensureFinanceStorage();
   const inspected = inspectMercadoPagoOrder(order);
-  if (!inspected.valid) return { updated: false, ignored: true, reason: inspected.reason };
+  if (!inspected.valid) {
+    return { updated: false, ignored: true, reason: inspected.reason };
+  }
+
+  let paymentFinancials = null;
+  const orderPaymentId = extractMercadoPagoOrderPaymentId(order);
+  if (inspected.purchaseStatus === "approved" && orderPaymentId) {
+    try {
+      const payment = await fetchPayment(orderPaymentId);
+      const inspectedPayment = inspectMercadoPagoPaymentFinancials(payment);
+      if (inspectedPayment.valid) {
+        paymentFinancials = inspectedPayment;
+      } else {
+        console.warn("[Purchase API] Mercado Pago payment financials unavailable", {
+          order_id: inspected.orderId,
+          payment_id: orderPaymentId,
+          reason: inspectedPayment.reason,
+        });
+      }
+    } catch (error) {
+      console.warn("[Purchase API] Mercado Pago payment financial lookup failed", {
+        order_id: inspected.orderId,
+        payment_id: orderPaymentId,
+        error: error?.message ?? String(error),
+      });
+    }
+  }
 
   return withTransaction(async (client) => {
     const selected = await client.query(
       `SELECT p.id, p.provider, p.provider_payment_id, p.payer_email,
               p.coupon_id, p.original_amount_cents, p.discount_amount_cents,
               p.amount_cents, p.currency, p.status, p.paid_at,
+              p.provider_transaction_id, p.provider_fee_cents,
+              p.net_received_amount_cents, p.provider_financial_updated_at,
               p.created_at, p.updated_at, c.code AS coupon_code
        FROM purchases p
        LEFT JOIN coupons c ON c.id = p.coupon_id
@@ -298,9 +348,20 @@ export async function syncMercadoPagoPurchaseFromOrder(order) {
       return { updated: false, ignored: true, reason: "provider_order_mismatch" };
     }
 
+    const financialsMatch =
+      paymentFinancials &&
+      (paymentFinancials.transactionAmountCents === null ||
+        paymentFinancials.transactionAmountCents === purchase.amount_cents);
+    const financeUpdateNeeded =
+      financialsMatch &&
+      (purchase.provider_transaction_id !== paymentFinancials.paymentId ||
+        purchase.net_received_amount_cents !==
+          paymentFinancials.netReceivedAmountCents ||
+        purchase.provider_fee_cents !== paymentFinancials.providerFeeCents);
     const alreadySynchronized =
       purchase.provider_payment_id === inspected.orderId &&
-      purchase.status === inspected.purchaseStatus;
+      purchase.status === inspected.purchaseStatus &&
+      !financeUpdateNeeded;
     let synchronizedPurchase = purchase;
 
     if (!alreadySynchronized) {
@@ -309,12 +370,36 @@ export async function syncMercadoPagoPurchaseFromOrder(order) {
          SET provider_payment_id = COALESCE(provider_payment_id, $2),
              status = $3,
              paid_at = CASE WHEN $3 = 'approved' THEN COALESCE(paid_at, NOW()) ELSE paid_at END,
+             provider_transaction_id = CASE
+               WHEN $4::text IS NOT NULL THEN $4
+               ELSE provider_transaction_id
+             END,
+             provider_fee_cents = CASE
+               WHEN $5::integer IS NOT NULL THEN $5
+               ELSE provider_fee_cents
+             END,
+             net_received_amount_cents = CASE
+               WHEN $6::integer IS NOT NULL THEN $6
+               ELSE net_received_amount_cents
+             END,
+             provider_financial_updated_at = CASE
+               WHEN $6::integer IS NOT NULL THEN NOW()
+               ELSE provider_financial_updated_at
+             END,
              updated_at = NOW()
          WHERE id = $1
-         RETURNING id, provider, provider_payment_id, payer_email, coupon_id,
-                   original_amount_cents, discount_amount_cents, amount_cents,
-                   currency, status, paid_at, created_at, updated_at`,
-        [inspected.purchaseId, inspected.orderId, inspected.purchaseStatus],
+         RETURNING id, provider, provider_payment_id, provider_transaction_id,
+                   provider_fee_cents, net_received_amount_cents, payer_email,
+                   coupon_id, original_amount_cents, discount_amount_cents,
+                   amount_cents, currency, status, paid_at, created_at, updated_at`,
+        [
+          inspected.purchaseId,
+          inspected.orderId,
+          inspected.purchaseStatus,
+          financialsMatch ? paymentFinancials.paymentId : null,
+          financialsMatch ? paymentFinancials.providerFeeCents : null,
+          financialsMatch ? paymentFinancials.netReceivedAmountCents : null,
+        ],
       );
       synchronizedPurchase = {
         ...updated.rows[0],
