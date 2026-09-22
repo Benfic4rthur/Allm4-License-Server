@@ -1,3 +1,4 @@
+import { ensureCouponStorage } from "./coupon-schema.js";
 import { getPool, withTransaction } from "./db.js";
 import {
   finalizeCouponRedemption,
@@ -109,6 +110,7 @@ export async function createPixPurchase({
   couponCode = null,
   fetchImpl = fetch,
 }) {
+  await ensureCouponStorage();
   const prepared = await withTransaction(async (client) => {
     let coupon = null;
     let pricing = {
@@ -225,6 +227,7 @@ export async function createPixPurchase({
 }
 
 export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
+  await ensureCouponStorage();
   if (typeof purchaseId !== "string" || !UUID_PATTERN.test(purchaseId)) {
     return { ok: false, reason: "invalid_purchase_id" };
   }
@@ -265,6 +268,7 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
 }
 
 export async function syncMercadoPagoPurchaseFromOrder(order) {
+  await ensureCouponStorage();
   const inspected = inspectMercadoPagoOrder(order);
   if (!inspected.valid) return { updated: false, ignored: true, reason: inspected.reason };
 
