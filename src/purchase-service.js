@@ -1,4 +1,9 @@
 import { getPool, withTransaction } from "./db.js";
+import {
+  finalizeCouponRedemption,
+  lockCouponForPurchase,
+  recordCouponRedemption,
+} from "./coupon-service.js";
 import { createPixOrder, extractPixDetails } from "./mercado-pago.js";
 import { ensurePurchaseLicense } from "./purchase-license-service.js";
 import {
@@ -21,6 +26,9 @@ function mapPurchase(row) {
     provider: row.provider,
     provider_payment_id: row.provider_payment_id ?? null,
     payer_email: row.payer_email ?? null,
+    coupon_code: row.coupon_code ?? null,
+    original_amount_cents: row.original_amount_cents ?? row.amount_cents,
+    discount_amount_cents: row.discount_amount_cents ?? 0,
     amount_cents: row.amount_cents,
     currency: row.currency,
     status: row.status,
@@ -61,7 +69,14 @@ export function inspectMercadoPagoOrder(order) {
   const purchaseStatus = mapMercadoPagoOrderStatus(order);
   if (!orderId) return { valid: false, reason: "missing_order_id" };
   if (!referenceMatch) return { valid: false, reason: "invalid_external_reference" };
-  if (amountCents !== ALLM4_LICENSE_PRICE_CENTS || currency !== "BRL") return { valid: false, reason: "unexpected_amount_or_currency" };
+  if (
+    amountCents === null ||
+    amountCents <= 0 ||
+    amountCents > ALLM4_LICENSE_PRICE_CENTS ||
+    currency !== "BRL"
+  ) {
+    return { valid: false, reason: "unexpected_amount_or_currency" };
+  }
   if (!purchaseStatus) return { valid: false, reason: "unsupported_order_status" };
   return {
     valid: true,
@@ -73,35 +88,138 @@ export function inspectMercadoPagoOrder(order) {
   };
 }
 
-export async function createPixPurchase({ payerEmail, payerFirstName = null, fetchImpl = fetch }) {
-  const inserted = await getPool().query(
-    `INSERT INTO purchases (provider, payer_email, amount_cents, currency, status)
-     VALUES ('mercado_pago', $1, $2, 'BRL', 'pending')
-     RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
-               currency, status, paid_at, created_at, updated_at`,
-    [payerEmail, ALLM4_LICENSE_PRICE_CENTS],
-  );
-  const purchase = inserted.rows[0];
-  const externalReference = `allm4_${purchase.id}`;
-  const order = await createPixOrder({
-    amountCents: ALLM4_LICENSE_PRICE_CENTS,
-    externalReference,
-    payerEmail,
-    payerFirstName,
-    fetchImpl,
+async function rejectFailedProviderPurchase(purchaseId) {
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE purchases
+       SET status = 'rejected', updated_at = NOW()
+       WHERE id = $1 AND status = 'pending'`,
+      [purchaseId],
+    );
+    await finalizeCouponRedemption(client, {
+      purchaseId,
+      purchaseStatus: "rejected",
+    });
   });
+}
+
+export async function createPixPurchase({
+  payerEmail,
+  payerFirstName = null,
+  couponCode = null,
+  fetchImpl = fetch,
+}) {
+  const prepared = await withTransaction(async (client) => {
+    let coupon = null;
+    let pricing = {
+      original_amount_cents: ALLM4_LICENSE_PRICE_CENTS,
+      discount_amount_cents: 0,
+      final_amount_cents: ALLM4_LICENSE_PRICE_CENTS,
+    };
+
+    if (couponCode) {
+      const validated = await lockCouponForPurchase(client, {
+        couponCode,
+        payerEmail,
+        baseAmountCents: ALLM4_LICENSE_PRICE_CENTS,
+      });
+      coupon = validated.coupon;
+      pricing = validated.pricing;
+    }
+
+    const freePurchase = pricing.final_amount_cents === 0;
+    const inserted = await client.query(
+      `INSERT INTO purchases (
+         provider, payer_email, coupon_id, original_amount_cents,
+         discount_amount_cents, amount_cents, currency, status, paid_at
+       )
+       VALUES (
+         $1, $2, $3, $4, $5, $6, 'BRL', $7,
+         CASE WHEN $7 = 'approved' THEN NOW() ELSE NULL END
+       )
+       RETURNING id, provider, provider_payment_id, payer_email, coupon_id,
+                 original_amount_cents, discount_amount_cents, amount_cents,
+                 currency, status, paid_at, created_at, updated_at`,
+      [
+        freePurchase ? "coupon" : "mercado_pago",
+        payerEmail,
+        coupon?.id ?? null,
+        pricing.original_amount_cents,
+        pricing.discount_amount_cents,
+        pricing.final_amount_cents,
+        freePurchase ? "approved" : "pending",
+      ],
+    );
+    const purchase = inserted.rows[0];
+
+    if (coupon) {
+      await recordCouponRedemption(client, {
+        couponId: coupon.id,
+        purchaseId: purchase.id,
+        payerEmail,
+        redeemed: freePurchase,
+      });
+    }
+
+    if (freePurchase) {
+      await ensurePurchaseLicense(client, purchase.id);
+    }
+
+    return {
+      purchase: { ...purchase, coupon_code: coupon?.code ?? null },
+      freePurchase,
+    };
+  });
+
+  const purchaseId = prepared.purchase.id;
+  const lookupToken = derivePurchaseLookupToken(purchaseId);
+
+  if (prepared.freePurchase) {
+    return {
+      purchase: mapPurchase(prepared.purchase),
+      lookup_token: lookupToken,
+      payment_required: false,
+      pix: null,
+    };
+  }
+
+  const externalReference = `allm4_${purchaseId}`;
+  let order;
+  try {
+    order = await createPixOrder({
+      amountCents: prepared.purchase.amount_cents,
+      externalReference,
+      payerEmail,
+      payerFirstName,
+      fetchImpl,
+    });
+  } catch (error) {
+    await rejectFailedProviderPurchase(purchaseId);
+    throw error;
+  }
+
   const orderId = order?.id;
-  if (!orderId || typeof orderId !== "string") throw new Error("Mercado Pago order response did not include an id");
+  if (!orderId || typeof orderId !== "string") {
+    await rejectFailedProviderPurchase(purchaseId);
+    throw new Error("Mercado Pago order response did not include an id");
+  }
+
   const updated = await getPool().query(
     `UPDATE purchases SET provider_payment_id = $2, updated_at = NOW()
      WHERE id = $1
-     RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
+     RETURNING id, provider, provider_payment_id, payer_email, coupon_id,
+               original_amount_cents, discount_amount_cents, amount_cents,
                currency, status, paid_at, created_at, updated_at`,
-    [purchase.id, orderId],
+    [purchaseId, orderId],
   );
+
   return {
-    purchase: mapPurchase(updated.rows[0]),
-    lookup_token: derivePurchaseLookupToken(purchase.id),
+    purchase: mapPurchase({
+      ...updated.rows[0],
+      coupon_code: prepared.purchase.coupon_code,
+    }),
+    lookup_token: lookupToken,
+    payment_required: true,
     pix: extractPixDetails(order),
   };
 }
@@ -114,9 +232,11 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
     return { ok: false, reason: "invalid_lookup_token" };
   }
   const result = await getPool().query(
-    `SELECT p.id, p.status, p.amount_cents, p.currency, p.paid_at,
+    `SELECT p.id, p.status, p.original_amount_cents, p.discount_amount_cents,
+            p.amount_cents, p.currency, p.paid_at, c.code AS coupon_code,
             l.id AS license_id, l.license_key_hash, l.status AS license_status
      FROM purchases p
+     LEFT JOIN coupons c ON c.id = p.coupon_id
      LEFT JOIN licenses l ON l.purchase_id = p.id
      WHERE p.id = $1`,
     [purchaseId],
@@ -126,6 +246,9 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
   const purchase = {
     purchase_id: row.id,
     status: row.status,
+    coupon_code: row.coupon_code ?? null,
+    original_amount_cents: row.original_amount_cents,
+    discount_amount_cents: row.discount_amount_cents,
     amount_cents: row.amount_cents,
     currency: row.currency,
     paid_at: row.paid_at ?? null,
@@ -144,23 +267,38 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
 export async function syncMercadoPagoPurchaseFromOrder(order) {
   const inspected = inspectMercadoPagoOrder(order);
   if (!inspected.valid) return { updated: false, ignored: true, reason: inspected.reason };
+
   return withTransaction(async (client) => {
     const selected = await client.query(
-      `SELECT id, provider, provider_payment_id, payer_email, amount_cents,
-              currency, status, paid_at, created_at, updated_at
-       FROM purchases WHERE id = $1 FOR UPDATE`,
+      `SELECT p.id, p.provider, p.provider_payment_id, p.payer_email,
+              p.coupon_id, p.original_amount_cents, p.discount_amount_cents,
+              p.amount_cents, p.currency, p.status, p.paid_at,
+              p.created_at, p.updated_at, c.code AS coupon_code
+       FROM purchases p
+       LEFT JOIN coupons c ON c.id = p.coupon_id
+       WHERE p.id = $1
+       FOR UPDATE OF p`,
       [inspected.purchaseId],
     );
     const purchase = selected.rows[0];
     if (!purchase) return { updated: false, ignored: true, reason: "purchase_not_found" };
-    if (purchase.provider !== "mercado_pago" || purchase.amount_cents !== ALLM4_LICENSE_PRICE_CENTS || purchase.currency !== "BRL") {
+    if (
+      purchase.provider !== "mercado_pago" ||
+      purchase.amount_cents !== inspected.amountCents ||
+      purchase.currency !== inspected.currency ||
+      purchase.amount_cents <= 0
+    ) {
       return { updated: false, ignored: true, reason: "purchase_mismatch" };
     }
     if (purchase.provider_payment_id && purchase.provider_payment_id !== inspected.orderId) {
       return { updated: false, ignored: true, reason: "provider_order_mismatch" };
     }
-    const alreadySynchronized = purchase.provider_payment_id === inspected.orderId && purchase.status === inspected.purchaseStatus;
+
+    const alreadySynchronized =
+      purchase.provider_payment_id === inspected.orderId &&
+      purchase.status === inspected.purchaseStatus;
     let synchronizedPurchase = purchase;
+
     if (!alreadySynchronized) {
       const updated = await client.query(
         `UPDATE purchases
@@ -169,16 +307,27 @@ export async function syncMercadoPagoPurchaseFromOrder(order) {
              paid_at = CASE WHEN $3 = 'approved' THEN COALESCE(paid_at, NOW()) ELSE paid_at END,
              updated_at = NOW()
          WHERE id = $1
-         RETURNING id, provider, provider_payment_id, payer_email, amount_cents,
+         RETURNING id, provider, provider_payment_id, payer_email, coupon_id,
+                   original_amount_cents, discount_amount_cents, amount_cents,
                    currency, status, paid_at, created_at, updated_at`,
         [inspected.purchaseId, inspected.orderId, inspected.purchaseStatus],
       );
-      synchronizedPurchase = updated.rows[0];
+      synchronizedPurchase = {
+        ...updated.rows[0],
+        coupon_code: purchase.coupon_code,
+      };
     }
+
+    await finalizeCouponRedemption(client, {
+      purchaseId: inspected.purchaseId,
+      purchaseStatus: inspected.purchaseStatus,
+    });
+
     let purchaseLicense = null;
     if (inspected.purchaseStatus === "approved") {
       purchaseLicense = await ensurePurchaseLicense(client, inspected.purchaseId);
     }
+
     return {
       updated: !alreadySynchronized,
       ignored: false,
