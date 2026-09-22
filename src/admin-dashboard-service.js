@@ -41,6 +41,10 @@ function mapSale(row) {
     license_id: row.license_id ?? null,
     license_status: row.license_status ?? null,
     archived: row.admin_archived_at !== null && row.admin_archived_at !== undefined,
+    financial_breakdown_unavailable:
+      row.net_received_amount_cents === null &&
+      row.admin_financial_resolved_at !== null &&
+      row.admin_financial_resolved_at !== undefined,
   };
 }
 
@@ -132,7 +136,14 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
            WHERE provider = 'mercado_pago'
              AND status = 'approved'
              AND net_received_amount_cents IS NULL
-         ) AS net_pending_count
+             AND admin_financial_resolved_at IS NULL
+         ) AS net_pending_count,
+         COUNT(*) FILTER (
+           WHERE provider = 'mercado_pago'
+             AND status = 'approved'
+             AND net_received_amount_cents IS NULL
+             AND admin_financial_resolved_at IS NOT NULL
+         ) AS net_unavailable_count
        FROM purchases
        WHERE COALESCE(paid_at, created_at) >= $1
          AND COALESCE(paid_at, created_at) < $2
@@ -210,7 +221,12 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
          ), 0) AS net_revenue_cents,
          COUNT(*) FILTER (
            WHERE net_received_amount_cents IS NULL
-         ) AS net_pending_count
+             AND admin_financial_resolved_at IS NULL
+         ) AS net_pending_count,
+         COUNT(*) FILTER (
+           WHERE net_received_amount_cents IS NULL
+             AND admin_financial_resolved_at IS NOT NULL
+         ) AS net_unavailable_count
        FROM purchases
        WHERE provider = 'mercado_pago'
          AND status = 'approved'
@@ -238,6 +254,7 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
       provider_fee_cents: number(s.provider_fee_cents),
       discount_total_cents: number(s.discount_total_cents),
       net_pending_count: number(s.net_pending_count),
+      net_unavailable_count: number(s.net_unavailable_count),
       average_ticket_cents:
         salesCount > 0 ? Math.round(gross / salesCount) : 0,
       active_licenses: number(currentRow.active_licenses),
@@ -259,6 +276,7 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
       gross_revenue_cents: number(row.gross_revenue_cents),
       net_revenue_cents: number(row.net_revenue_cents),
       net_pending_count: number(row.net_pending_count),
+      net_unavailable_count: number(row.net_unavailable_count),
     })),
   };
 }
@@ -278,7 +296,7 @@ export async function listAdminSales({
        p.provider_transaction_id, p.status, p.original_amount_cents,
        p.discount_amount_cents, p.amount_cents, p.provider_fee_cents,
        p.net_received_amount_cents, p.paid_at, p.created_at,
-       p.admin_archived_at,
+       p.admin_archived_at, p.admin_financial_resolved_at,
        c.code AS coupon_code, l.id AS license_id, l.status AS license_status
      FROM purchases p
      LEFT JOIN coupons c ON c.id = p.coupon_id
@@ -435,6 +453,7 @@ export async function reconcileAdminSales({ limit = 25 } = {}) {
      WHERE provider = 'mercado_pago'
        AND status = 'approved'
        AND admin_archived_at IS NULL
+       AND admin_financial_resolved_at IS NULL
        AND net_received_amount_cents IS NULL
      ORDER BY COALESCE(paid_at, created_at) DESC
      LIMIT $1`,
@@ -484,6 +503,7 @@ export async function reconcileAdminSales({ limit = 25 } = {}) {
            WHERE provider = 'mercado_pago'
              AND status = 'approved'
              AND admin_archived_at IS NULL
+             AND admin_financial_resolved_at IS NULL
              AND net_received_amount_cents IS NULL`,
         )
       ).rows[0]?.count,

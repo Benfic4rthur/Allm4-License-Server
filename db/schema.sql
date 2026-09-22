@@ -59,6 +59,9 @@ ALTER TABLE purchases
 ALTER TABLE purchases
   ADD COLUMN IF NOT EXISTS admin_archived_at TIMESTAMPTZ;
 
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS admin_financial_resolved_at TIMESTAMPTZ;
+
 UPDATE purchases
 SET original_amount_cents = amount_cents
 WHERE original_amount_cents IS NULL;
@@ -252,6 +255,8 @@ WHERE l.primary_device_id IS NULL
 CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
 CREATE INDEX IF NOT EXISTS idx_purchases_admin_archived_at
   ON purchases(admin_archived_at);
+CREATE INDEX IF NOT EXISTS idx_purchases_admin_financial_resolved_at
+  ON purchases(admin_financial_resolved_at);
 CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses(status);
 CREATE INDEX IF NOT EXISTS idx_licenses_admin_archived_at
   ON licenses(admin_archived_at);
