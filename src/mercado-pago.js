@@ -151,10 +151,22 @@ export async function getMercadoPagoPayment(paymentId, { fetchImpl = fetch } = {
 }
 
 export function extractMercadoPagoOrderPaymentId(order) {
-  const value = order?.transactions?.payments?.[0]?.id;
-  if (value === null || value === undefined) return null;
-  const normalized = String(value).trim();
-  return normalized || null;
+  const payment = order?.transactions?.payments?.[0] ?? null;
+  const referenceId = payment?.reference_id;
+  if (referenceId !== null && referenceId !== undefined) {
+    const normalizedReference = String(referenceId).trim();
+    if (normalizedReference) return normalizedReference;
+  }
+
+  const transactionId = payment?.id;
+  if (transactionId === null || transactionId === undefined) return null;
+  const normalizedTransactionId = String(transactionId).trim();
+
+  // A API de Payments legada usa IDs numéricos. IDs da Orders API como PAY...
+  // identificam a transação da order, não o payment processado.
+  return /^\d+$/.test(normalizedTransactionId)
+    ? normalizedTransactionId
+    : null;
 }
 
 export function inspectMercadoPagoPaymentFinancials(payment) {
@@ -201,7 +213,7 @@ export function inspectMercadoPagoPaymentFinancials(payment) {
     transactionAmountCents,
     netReceivedAmountCents: netReceivedCents,
     providerFeeCents:
-      mercadoPagoFeeCents > 0 ? mercadoPagoFeeCents : derivedFeeCents,
+      derivedFeeCents !== null ? derivedFeeCents : mercadoPagoFeeCents || null,
   };
 }
 
