@@ -1,3 +1,4 @@
+import { ensureCouponStorage } from "./coupon-schema.js";
 import { getPool } from "./db.js";
 
 export class CouponValidationError extends Error {
@@ -137,6 +138,7 @@ export async function previewCoupon({
   payerEmail,
   baseAmountCents,
 }) {
+  await ensureCouponStorage();
   const code = normalizeCouponCode(couponCode);
   if (!code) {
     throw new CouponValidationError("invalid_coupon_code");
