@@ -144,6 +144,67 @@ export async function getMercadoPagoOrder(orderId, { fetchImpl = fetch } = {}) {
   });
 }
 
+export async function getMercadoPagoPayment(paymentId, { fetchImpl = fetch } = {}) {
+  return mercadoPagoRequest(`/v1/payments/${encodeURIComponent(paymentId)}`, {
+    fetchImpl,
+  });
+}
+
+export function extractMercadoPagoOrderPaymentId(order) {
+  const value = order?.transactions?.payments?.[0]?.id;
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim();
+  return normalized || null;
+}
+
+export function inspectMercadoPagoPaymentFinancials(payment) {
+  const paymentId =
+    payment?.id === null || payment?.id === undefined
+      ? null
+      : String(payment.id).trim() || null;
+  if (!paymentId) return { valid: false, reason: "missing_payment_id" };
+
+  const toCents = (value) => {
+    if (typeof value !== "string" && typeof value !== "number") return null;
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) return null;
+    const cents = Math.round(numeric * 100);
+    return Number.isSafeInteger(cents) ? cents : null;
+  };
+
+  const netReceivedCents = toCents(
+    payment?.transaction_details?.net_received_amount,
+  );
+  const transactionAmountCents = toCents(payment?.transaction_amount);
+  const feeDetails = Array.isArray(payment?.fee_details)
+    ? payment.fee_details
+    : [];
+  const mercadoPagoFeeCents = feeDetails.reduce((sum, fee) => {
+    if (fee?.fee_payer && fee.fee_payer !== "collector") return sum;
+    if (fee?.type && fee.type !== "mercadopago_fee") return sum;
+    const amount = toCents(fee?.amount);
+    return amount === null ? sum : sum + amount;
+  }, 0);
+
+  if (netReceivedCents === null) {
+    return { valid: false, reason: "missing_net_received_amount" };
+  }
+
+  const derivedFeeCents =
+    transactionAmountCents !== null
+      ? Math.max(0, transactionAmountCents - netReceivedCents)
+      : null;
+
+  return {
+    valid: true,
+    paymentId,
+    transactionAmountCents,
+    netReceivedAmountCents: netReceivedCents,
+    providerFeeCents:
+      mercadoPagoFeeCents > 0 ? mercadoPagoFeeCents : derivedFeeCents,
+  };
+}
+
 export function extractPixDetails(order) {
   const payment = order?.transactions?.payments?.[0] ?? null;
   const paymentMethod = payment?.payment_method ?? null;
