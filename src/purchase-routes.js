@@ -1,6 +1,11 @@
 import express from "express";
+import {
+  CouponValidationError,
+  previewCoupon,
+} from "./coupon-service.js";
 import { MercadoPagoApiError } from "./mercado-pago.js";
 import {
+  ALLM4_LICENSE_PRICE_CENTS,
   createPixPurchase,
   getPurchaseStatusForClient,
 } from "./purchase-service.js";
@@ -32,7 +37,35 @@ function normalizeOptionalFirstName(value) {
   return { value: normalized };
 }
 
+function normalizeOptionalCouponCode(value) {
+  if (value === undefined || value === null || value === "") return { value: null };
+  if (typeof value !== "string") return { error: "must_be_string" };
+  const normalized = value.trim();
+  if (!normalized) return { value: null };
+  if (normalized.length > 40) return { error: "too_long" };
+  return { value: normalized };
+}
+
+function publicCoupon(coupon) {
+  return {
+    code: coupon.code,
+    discount_type: coupon.discount_type,
+    discount_value: coupon.discount_value,
+    starts_at: coupon.starts_at,
+    expires_at: coupon.expires_at,
+    max_uses: coupon.max_uses,
+    max_uses_per_email: coupon.max_uses_per_email,
+  };
+}
+
 function sendError(res, error) {
+  if (error instanceof CouponValidationError) {
+    return res.status(400).json({
+      ok: false,
+      error: "invalid_coupon",
+      reason: error.reason,
+    });
+  }
   if (error instanceof SecurityConfigurationError) {
     console.error("[Purchase API] required server secret is not configured", {
       variable: error.variableName,
@@ -54,20 +87,58 @@ function sendError(res, error) {
   return res.status(500).json({ ok: false, error: "internal_error" });
 }
 
+router.post("/coupons/validate", async (req, res) => {
+  try {
+    const body = getObjectBody(req);
+    const payerEmail = normalizeEmail(body.payer_email);
+    const couponCode = normalizeOptionalCouponCode(body.coupon_code);
+    const fields = {};
+
+    if (!payerEmail) fields.payer_email = "invalid";
+    if (!couponCode.value) {
+      fields.coupon_code = couponCode.error ?? "required";
+    }
+
+    if (Object.keys(fields).length > 0) {
+      return res.status(400).json({ ok: false, error: "invalid_request", fields });
+    }
+
+    const result = await previewCoupon({
+      couponCode: couponCode.value,
+      payerEmail,
+      baseAmountCents: ALLM4_LICENSE_PRICE_CENTS,
+    });
+
+    return res.status(200).json({
+      ok: true,
+      coupon: publicCoupon(result.coupon),
+      pricing: result.pricing,
+    });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 router.post("/purchases/pix", async (req, res) => {
   try {
     const body = getObjectBody(req);
     const payerEmail = normalizeEmail(body.payer_email);
     const payerFirstName = normalizeOptionalFirstName(body.payer_first_name);
+    const couponCode = normalizeOptionalCouponCode(body.coupon_code);
     const fields = {};
+
     if (!payerEmail) fields.payer_email = "invalid";
     if (payerFirstName.error) fields.payer_first_name = payerFirstName.error;
+    if (couponCode.error) fields.coupon_code = couponCode.error;
+
     if (Object.keys(fields).length > 0) {
       return res.status(400).json({ ok: false, error: "invalid_request", fields });
     }
+
     const created = await createPixPurchase({
       payerEmail,
       payerFirstName: payerFirstName.value,
+      couponCode: couponCode.value,
     });
     return res.status(201).json({ ok: true, ...created });
   } catch (error) {
