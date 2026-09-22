@@ -252,13 +252,13 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
       discount_total_cents: number(row.discount_total_cents),
       gross_revenue_cents: number(row.gross_revenue_cents),
       net_revenue_cents: number(row.net_revenue_cents),
-      net_pending_count: number(row.net_pending_count),
     })),
     series: series.rows.map((row) => ({
       day: row.day,
       sales_count: number(row.sales_count),
       gross_revenue_cents: number(row.gross_revenue_cents),
       net_revenue_cents: number(row.net_revenue_cents),
+      net_pending_count: number(row.net_pending_count),
     })),
   };
 }
