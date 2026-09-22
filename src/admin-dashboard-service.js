@@ -1,7 +1,16 @@
 import { ensureCouponStorage } from "./coupon-schema.js";
+import {
+  ensureAdminVisibilityStorage,
+  setAdminPurchaseArchived,
+} from "./admin-visibility-schema.js";
 import { getPool } from "./db.js";
 import { ensureFinanceStorage } from "./finance-schema.js";
-import { getMercadoPagoOrder } from "./mercado-pago.js";
+import {
+  extractMercadoPagoOrderPaymentId,
+  getMercadoPagoOrder,
+  getMercadoPagoPayment,
+  inspectMercadoPagoPaymentFinancials,
+} from "./mercado-pago.js";
 import { syncMercadoPagoPurchaseFromOrder } from "./purchase-service.js";
 import { derivePurchaseLicenseKey } from "./security.js";
 
@@ -31,6 +40,7 @@ function mapSale(row) {
     created_at: row.created_at,
     license_id: row.license_id ?? null,
     license_status: row.license_status ?? null,
+    archived: row.admin_archived_at !== null && row.admin_archived_at !== undefined,
   };
 }
 
@@ -61,6 +71,9 @@ function mapLicense(row) {
     issued_at: row.issued_at,
     revoked_at: row.revoked_at ?? null,
     revoke_reason: row.revoke_reason ?? null,
+    archived:
+      (row.admin_archived_at !== null && row.admin_archived_at !== undefined) ||
+      (row.purchase_archived_at !== null && row.purchase_archived_at !== undefined),
   };
 }
 
@@ -82,12 +95,16 @@ function mapDevice(row) {
     last_seen_at: row.last_seen_at,
     blocked_at: row.blocked_at ?? null,
     deactivated_at: row.deactivated_at ?? null,
+    archived:
+      (row.license_archived_at !== null && row.license_archived_at !== undefined) ||
+      (row.purchase_archived_at !== null && row.purchase_archived_at !== undefined),
   };
 }
 
-export async function getAdminDashboard({ from, to }) {
+export async function getAdminDashboard({ from, to, includeArchived = false }) {
   await ensureCouponStorage();
   await ensureFinanceStorage();
+  await ensureAdminVisibilityStorage();
   const pool = getPool();
 
   const [sales, current, couponPerformance, series] = await Promise.all([
@@ -118,8 +135,9 @@ export async function getAdminDashboard({ from, to }) {
          ) AS net_pending_count
        FROM purchases
        WHERE COALESCE(paid_at, created_at) >= $1
-         AND COALESCE(paid_at, created_at) < $2`,
-      [from, to],
+         AND COALESCE(paid_at, created_at) < $2
+         AND ($3::boolean OR admin_archived_at IS NULL)`,
+      [from, to, includeArchived],
     ),
     pool.query(
       `SELECT
@@ -128,10 +146,27 @@ export async function getAdminDashboard({ from, to }) {
          (
            SELECT COUNT(*)
            FROM devices d
+           JOIN licenses dl ON dl.id = d.license_id
+           LEFT JOIN purchases dp ON dp.id = dl.purchase_id
            WHERE d.deactivated_at IS NULL
              AND d.blocked_at IS NULL
+             AND (
+               $1::boolean
+               OR (
+                 dl.admin_archived_at IS NULL
+                 AND (dp.id IS NULL OR dp.admin_archived_at IS NULL)
+               )
+             )
          ) AS active_devices
-       FROM licenses l`,
+       FROM licenses l
+       LEFT JOIN purchases lp ON lp.id = l.purchase_id
+       WHERE
+         $1::boolean
+         OR (
+           l.admin_archived_at IS NULL
+           AND (lp.id IS NULL OR lp.admin_archived_at IS NULL)
+         )`,
+      [includeArchived],
     ),
     pool.query(
       `SELECT
@@ -155,11 +190,12 @@ export async function getAdminDashboard({ from, to }) {
          ON p.coupon_id = c.id
         AND COALESCE(p.paid_at, p.created_at) >= $1
         AND COALESCE(p.paid_at, p.created_at) < $2
+        AND ($3::boolean OR p.admin_archived_at IS NULL)
        GROUP BY c.id, c.code, c.discount_type, c.discount_value
        HAVING COUNT(p.id) FILTER (WHERE p.status = 'approved') > 0
        ORDER BY approved_uses DESC, c.code ASC
        LIMIT 20`,
-      [from, to],
+      [from, to, includeArchived],
     ),
     pool.query(
       `SELECT
@@ -171,15 +207,19 @@ export async function getAdminDashboard({ from, to }) {
          COALESCE(SUM(amount_cents), 0) AS gross_revenue_cents,
          COALESCE(SUM(net_received_amount_cents) FILTER (
            WHERE net_received_amount_cents IS NOT NULL
-         ), 0) AS net_revenue_cents
+         ), 0) AS net_revenue_cents,
+         COUNT(*) FILTER (
+           WHERE net_received_amount_cents IS NULL
+         ) AS net_pending_count
        FROM purchases
        WHERE provider = 'mercado_pago'
          AND status = 'approved'
          AND COALESCE(paid_at, created_at) >= $1
          AND COALESCE(paid_at, created_at) < $2
+         AND ($3::boolean OR admin_archived_at IS NULL)
        GROUP BY day
        ORDER BY day ASC`,
-      [from, to],
+      [from, to, includeArchived],
     ),
   ]);
 
@@ -218,39 +258,53 @@ export async function getAdminDashboard({ from, to }) {
       sales_count: number(row.sales_count),
       gross_revenue_cents: number(row.gross_revenue_cents),
       net_revenue_cents: number(row.net_revenue_cents),
+      net_pending_count: number(row.net_pending_count),
     })),
   };
 }
 
-export async function listAdminSales({ from, to, limit = 250 }) {
+export async function listAdminSales({
+  from,
+  to,
+  limit = 250,
+  includeArchived = false,
+}) {
   await ensureCouponStorage();
   await ensureFinanceStorage();
+  await ensureAdminVisibilityStorage();
   const result = await getPool().query(
     `SELECT
        p.id, p.payer_email, p.provider, p.provider_payment_id,
        p.provider_transaction_id, p.status, p.original_amount_cents,
        p.discount_amount_cents, p.amount_cents, p.provider_fee_cents,
        p.net_received_amount_cents, p.paid_at, p.created_at,
+       p.admin_archived_at,
        c.code AS coupon_code, l.id AS license_id, l.status AS license_status
      FROM purchases p
      LEFT JOIN coupons c ON c.id = p.coupon_id
      LEFT JOIN licenses l ON l.purchase_id = p.id
      WHERE COALESCE(p.paid_at, p.created_at) >= $1
        AND COALESCE(p.paid_at, p.created_at) < $2
+       AND ($3::boolean OR p.admin_archived_at IS NULL)
      ORDER BY COALESCE(p.paid_at, p.created_at) DESC
-     LIMIT $3`,
-    [from, to, limit],
+     LIMIT $4`,
+    [from, to, includeArchived, limit],
   );
   return result.rows.map(mapSale);
 }
 
-export async function listAdminLicenses({ limit = 500 } = {}) {
+export async function listAdminLicenses({
+  limit = 500,
+  includeArchived = false,
+} = {}) {
   await ensureFinanceStorage();
+  await ensureAdminVisibilityStorage();
   const result = await getPool().query(
     `SELECT
        l.id, l.purchase_id, l.status, l.max_devices, l.primary_device_id,
        l.issued_at, l.revoked_at, l.revoke_reason,
        p.payer_email, p.amount_cents, p.net_received_amount_cents,
+       l.admin_archived_at, p.admin_archived_at AS purchase_archived_at,
        c.code AS coupon_code,
        COUNT(d.id) AS total_devices,
        COUNT(d.id) FILTER (
@@ -263,43 +317,124 @@ export async function listAdminLicenses({ limit = 500 } = {}) {
      LEFT JOIN coupons c ON c.id = p.coupon_id
      LEFT JOIN devices d ON d.license_id = l.id
      LEFT JOIN devices pd ON pd.id = l.primary_device_id
+     WHERE
+       $1::boolean
+       OR (
+         l.admin_archived_at IS NULL
+         AND (p.id IS NULL OR p.admin_archived_at IS NULL)
+       )
      GROUP BY
        l.id, l.purchase_id, l.status, l.max_devices, l.primary_device_id,
        l.issued_at, l.revoked_at, l.revoke_reason,
        p.payer_email, p.amount_cents, p.net_received_amount_cents,
+       l.admin_archived_at, p.admin_archived_at,
        c.code, pd.device_name, pd.platform
      ORDER BY l.issued_at DESC
-     LIMIT $1`,
-    [limit],
+     LIMIT $2`,
+    [includeArchived, limit],
   );
   return result.rows.map(mapLicense);
 }
 
-export async function listAdminDevices({ limit = 1000 } = {}) {
+export async function listAdminDevices({
+  limit = 1000,
+  includeArchived = false,
+} = {}) {
+  await ensureAdminVisibilityStorage();
   const result = await getPool().query(
     `SELECT
        d.id, d.license_id, d.device_name, d.platform,
        d.first_activated_at, d.last_seen_at, d.blocked_at, d.deactivated_at,
        l.status AS license_status, l.primary_device_id,
+       l.admin_archived_at AS license_archived_at,
+       p.admin_archived_at AS purchase_archived_at,
        p.payer_email
      FROM devices d
      JOIN licenses l ON l.id = d.license_id
      LEFT JOIN purchases p ON p.id = l.purchase_id
+     WHERE
+       $1::boolean
+       OR (
+         l.admin_archived_at IS NULL
+         AND (p.id IS NULL OR p.admin_archived_at IS NULL)
+       )
      ORDER BY d.last_seen_at DESC
-     LIMIT $1`,
-    [limit],
+     LIMIT $2`,
+    [includeArchived, limit],
   );
   return result.rows.map(mapDevice);
 }
 
+async function recoverLegacyPurchaseFinancials(row, order = null) {
+  const candidateIds = new Set();
+
+  if (order) {
+    const orderPaymentId = extractMercadoPagoOrderPaymentId(order);
+    if (orderPaymentId) candidateIds.add(orderPaymentId);
+  }
+
+  for (const value of [
+    row.provider_transaction_id,
+    row.provider_payment_id,
+  ]) {
+    const normalized =
+      value === null || value === undefined ? "" : String(value).trim();
+    if (/^\d+$/.test(normalized)) candidateIds.add(normalized);
+  }
+
+  for (const paymentId of candidateIds) {
+    try {
+      const payment = await getMercadoPagoPayment(paymentId);
+      const financials = inspectMercadoPagoPaymentFinancials(payment);
+      if (
+        !financials.valid ||
+        (financials.transactionAmountCents !== null &&
+          financials.transactionAmountCents !== number(row.amount_cents))
+      ) {
+        continue;
+      }
+
+      const updated = await getPool().query(
+        `UPDATE purchases
+         SET provider_transaction_id = $2,
+             provider_fee_cents = $3,
+             net_received_amount_cents = $4,
+             provider_financial_updated_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+           AND admin_archived_at IS NULL
+         RETURNING id`,
+        [
+          row.id,
+          financials.paymentId,
+          financials.providerFeeCents,
+          financials.netReceivedAmountCents,
+        ],
+      );
+
+      if (updated.rowCount > 0) return true;
+    } catch (error) {
+      console.warn("[Admin Dashboard] legacy payment lookup failed", {
+        purchase_id: row.id,
+        payment_id: paymentId,
+        error: error?.message ?? String(error),
+      });
+    }
+  }
+
+  return false;
+}
+
 export async function reconcileAdminSales({ limit = 25 } = {}) {
   await ensureFinanceStorage();
+  await ensureAdminVisibilityStorage();
   const result = await getPool().query(
-    `SELECT id, provider_payment_id
+    `SELECT
+       id, provider_payment_id, provider_transaction_id, amount_cents
      FROM purchases
      WHERE provider = 'mercado_pago'
        AND status = 'approved'
-       AND provider_payment_id IS NOT NULL
+       AND admin_archived_at IS NULL
        AND net_received_amount_cents IS NULL
      ORDER BY COALESCE(paid_at, created_at) DESC
      LIMIT $1`,
@@ -310,19 +445,31 @@ export async function reconcileAdminSales({ limit = 25 } = {}) {
   let failed = 0;
 
   for (const row of result.rows) {
-    try {
-      const order = await getMercadoPagoOrder(row.provider_payment_id);
-      const synced = await syncMercadoPagoPurchaseFromOrder(order);
-      if (!synced.ignored) synchronized += 1;
-      else failed += 1;
-    } catch (error) {
-      failed += 1;
-      console.warn("[Admin Dashboard] sale reconciliation failed", {
-        purchase_id: row.id,
-        order_id: row.provider_payment_id,
-        error: error?.message ?? String(error),
-      });
+    let order = null;
+    let recovered = false;
+
+    if (row.provider_payment_id) {
+      try {
+        order = await getMercadoPagoOrder(row.provider_payment_id);
+        const synced = await syncMercadoPagoPurchaseFromOrder(order);
+        recovered =
+          synced?.purchase?.net_received_amount_cents !== null &&
+          synced?.purchase?.net_received_amount_cents !== undefined;
+      } catch (error) {
+        console.warn("[Admin Dashboard] order reconciliation failed", {
+          purchase_id: row.id,
+          order_id: row.provider_payment_id,
+          error: error?.message ?? String(error),
+        });
+      }
     }
+
+    if (!recovered) {
+      recovered = await recoverLegacyPurchaseFinancials(row, order);
+    }
+
+    if (recovered) synchronized += 1;
+    else failed += 1;
   }
 
   return {
@@ -336,9 +483,14 @@ export async function reconcileAdminSales({ limit = 25 } = {}) {
            FROM purchases
            WHERE provider = 'mercado_pago'
              AND status = 'approved'
+             AND admin_archived_at IS NULL
              AND net_received_amount_cents IS NULL`,
         )
       ).rows[0]?.count,
     ),
   };
+}
+
+export async function setAdminSaleArchived({ purchaseId, archived }) {
+  return setAdminPurchaseArchived({ purchaseId, archived });
 }

@@ -56,6 +56,9 @@ ALTER TABLE purchases
 ALTER TABLE purchases
   ADD COLUMN IF NOT EXISTS provider_financial_updated_at TIMESTAMPTZ;
 
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS admin_archived_at TIMESTAMPTZ;
+
 UPDATE purchases
 SET original_amount_cents = amount_cents
 WHERE original_amount_cents IS NULL;
@@ -166,6 +169,9 @@ CREATE TABLE IF NOT EXISTS activations (
 ALTER TABLE licenses
   ADD COLUMN IF NOT EXISTS primary_device_id UUID;
 
+ALTER TABLE licenses
+  ADD COLUMN IF NOT EXISTS admin_archived_at TIMESTAMPTZ;
+
 ALTER TABLE devices
   ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ;
 
@@ -179,6 +185,11 @@ EXCEPTION
 END $allm4$;
 
 CREATE TABLE IF NOT EXISTS license_schema_migrations (
+  key TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admin_visibility_migrations (
   key TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -239,7 +250,11 @@ WHERE l.primary_device_id IS NULL
   );
 
 CREATE INDEX IF NOT EXISTS idx_purchases_status ON purchases(status);
+CREATE INDEX IF NOT EXISTS idx_purchases_admin_archived_at
+  ON purchases(admin_archived_at);
 CREATE INDEX IF NOT EXISTS idx_licenses_status ON licenses(status);
+CREATE INDEX IF NOT EXISTS idx_licenses_admin_archived_at
+  ON licenses(admin_archived_at);
 CREATE INDEX IF NOT EXISTS idx_devices_license_id ON devices(license_id);
 CREATE INDEX IF NOT EXISTS idx_devices_active ON devices(license_id) WHERE deactivated_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_available_active

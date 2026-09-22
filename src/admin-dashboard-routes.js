@@ -5,6 +5,7 @@ import {
   listAdminLicenses,
   listAdminSales,
   reconcileAdminSales,
+  setAdminSaleArchived,
 } from "./admin-dashboard-service.js";
 import {
   SecurityConfigurationError,
@@ -42,6 +43,14 @@ function parseLimit(value, fallback, max) {
     return null;
   }
   return numeric;
+}
+
+function includeArchived(req) {
+  const value =
+    typeof req.query.include_archived === "string"
+      ? req.query.include_archived.trim().toLowerCase()
+      : "";
+  return value === "1" || value === "true";
 }
 
 function parseDateRange(req) {
@@ -92,7 +101,10 @@ router.get("/admin/dashboard", requireAdmin, async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_date_range" });
     }
 
-    const dashboard = await getAdminDashboard(range);
+    const dashboard = await getAdminDashboard({
+      ...range,
+      includeArchived: includeArchived(req),
+    });
     return res.status(200).json({ ok: true, dashboard });
   } catch (error) {
     return sendError(res, error);
@@ -107,7 +119,11 @@ router.get("/admin/sales", requireAdmin, async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_request" });
     }
 
-    const sales = await listAdminSales({ ...range, limit });
+    const sales = await listAdminSales({
+      ...range,
+      limit,
+      includeArchived: includeArchived(req),
+    });
     return res.status(200).json({ ok: true, sales });
   } catch (error) {
     return sendError(res, error);
@@ -132,6 +148,42 @@ router.post("/admin/sales/reconcile", requireAdmin, async (req, res) => {
   }
 });
 
+router.patch("/admin/sales/:purchaseId/archive", requireAdmin, async (req, res) => {
+  try {
+    const purchaseId =
+      typeof req.params.purchaseId === "string"
+        ? req.params.purchaseId.trim().toLowerCase()
+        : "";
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        purchaseId,
+      )
+    ) {
+      return res.status(400).json({ ok: false, error: "invalid_request" });
+    }
+
+    const body =
+      req.body && typeof req.body === "object" && !Array.isArray(req.body)
+        ? req.body
+        : {};
+    if (typeof body.archived !== "boolean") {
+      return res.status(400).json({ ok: false, error: "invalid_request" });
+    }
+
+    const result = await setAdminSaleArchived({
+      purchaseId,
+      archived: body.archived,
+    });
+    if (!result) {
+      return res.status(404).json({ ok: false, error: "purchase_not_found" });
+    }
+
+    return res.status(200).json({ ok: true, sale: result });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 router.get("/admin/licenses", requireAdmin, async (req, res) => {
   try {
     const limit = parseLimit(req.query.limit, 500, 1000);
@@ -139,7 +191,10 @@ router.get("/admin/licenses", requireAdmin, async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_request" });
     }
 
-    const licenses = await listAdminLicenses({ limit });
+    const licenses = await listAdminLicenses({
+      limit,
+      includeArchived: includeArchived(req),
+    });
     return res.status(200).json({ ok: true, licenses });
   } catch (error) {
     return sendError(res, error);
@@ -153,7 +208,10 @@ router.get("/admin/devices", requireAdmin, async (req, res) => {
       return res.status(400).json({ ok: false, error: "invalid_request" });
     }
 
-    const devices = await listAdminDevices({ limit });
+    const devices = await listAdminDevices({
+      limit,
+      includeArchived: includeArchived(req),
+    });
     return res.status(200).json({ ok: true, devices });
   } catch (error) {
     return sendError(res, error);
