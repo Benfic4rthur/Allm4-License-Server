@@ -35,3 +35,14 @@ test("reconciliation excludes archived test purchases", () => {
     /status = 'approved'[\s\S]*admin_archived_at IS NULL[\s\S]*net_received_amount_cents IS NULL/,
   );
 });
+
+
+test("legacy paid purchases are resolved without being counted as pending", () => {
+  assert.match(visibility, /admin_financial_resolved_at/);
+  assert.match(visibility, /resolve-preserved-legacy-finance-2026-09-22-v1/);
+  assert.match(dashboard, /net_unavailable_count/);
+  assert.match(
+    dashboard,
+    /admin_financial_resolved_at IS NULL[\s\S]*net_received_amount_cents IS NULL/,
+  );
+});
