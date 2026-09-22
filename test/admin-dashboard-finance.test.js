@@ -5,7 +5,34 @@ import {
   inspectMercadoPagoPaymentFinancials,
 } from "../src/mercado-pago.js";
 
-test("extracts Mercado Pago payment id from an order", () => {
+test("prefers the processed payment reference id from Orders API", () => {
+  assert.equal(
+    extractMercadoPagoOrderPaymentId({
+      transactions: {
+        payments: [
+          {
+            id: "PAY01J49MMW3SSBK5PSV3DFR32959",
+            reference_id: "123456789",
+          },
+        ],
+      },
+    }),
+    "123456789",
+  );
+});
+
+test("does not send PAY transaction ids to legacy Payments API", () => {
+  assert.equal(
+    extractMercadoPagoOrderPaymentId({
+      transactions: {
+        payments: [{ id: "PAY01J49MMW3SSBK5PSV3DFR32959" }],
+      },
+    }),
+    null,
+  );
+});
+
+test("keeps numeric order payment ids as a compatibility fallback", () => {
   assert.equal(
     extractMercadoPagoOrderPaymentId({
       transactions: { payments: [{ id: 123456789 }] },
@@ -39,7 +66,7 @@ test("uses the real Mercado Pago net received amount and fee", () => {
   });
 });
 
-test("derives fee from gross minus net when fee details are unavailable", () => {
+test("uses gross minus net as the exact total deducted amount", () => {
   const result = inspectMercadoPagoPaymentFinancials({
     id: "pay-1",
     transaction_amount: "9.99",
