@@ -46,3 +46,10 @@ test("legacy paid purchases are resolved without being counted as pending", () =
     /admin_financial_resolved_at IS NULL[\s\S]*net_received_amount_cents IS NULL/,
   );
 });
+
+
+test("historical finance recovery searches Mercado Pago by purchase external reference", () => {
+  assert.match(dashboard, /searchMercadoPagoPaymentsByExternalReference/);
+  assert.match(dashboard, /allm4_\$\{row\.id\}/);
+  assert.match(dashboard, /recoverResolvedHistoricalFinancials/);
+});
