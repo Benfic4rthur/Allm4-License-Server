@@ -148,6 +148,18 @@ async function ensureBugSchema() {
         );
 
       UPDATE bug_reports
+      SET automation_state = 'waiting_manual',
+          automation_retry_at = NULL
+      WHERE assigned_to = 'unassigned'
+        AND automation_state = 'ready'
+        AND EXISTS (
+          SELECT 1
+          FROM bug_repair_settings
+          WHERE id = 1
+            AND triage_mode = 'manual'
+        );
+
+      UPDATE bug_reports
       SET manual_claim_until = COALESCE(
         manual_claim_until,
         created_at + (
