@@ -38,7 +38,7 @@ export async function getAlmaProductPriceCents() {
   return (await getAlmaProductSettings()).price_cents;
 }
 
-export async function updateAlmaProductPrice(input = {}) {
+export function normalizeAlmaProductPriceInput(input = {}) {
   const priceCents = Number(input.price_cents);
   if (
     !Number.isSafeInteger(priceCents) ||
@@ -49,7 +49,11 @@ export async function updateAlmaProductPrice(input = {}) {
       price_cents: "must_be_positive_integer_within_limit",
     });
   }
+  return priceCents;
+}
 
+export async function updateAlmaProductPrice(input = {}) {
+  const priceCents = normalizeAlmaProductPriceInput(input);
   await ensureProductSettingsStorage();
   const result = await getPool().query(
     `UPDATE product_settings
