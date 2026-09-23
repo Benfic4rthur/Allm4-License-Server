@@ -16,6 +16,10 @@ import {
 } from "./mercado-pago.js";
 import { ensurePurchaseLicense } from "./purchase-license-service.js";
 import {
+  MAX_ALMA_PRODUCT_PRICE_CENTS,
+  getAlmaProductPriceCents,
+} from "./product-settings-service.js";
+import {
   derivePurchaseLicenseKey,
   derivePurchaseLookupToken,
   hashLicenseKey,
@@ -91,7 +95,7 @@ export function inspectMercadoPagoOrder(order) {
   if (
     amountCents === null ||
     amountCents <= 0 ||
-    amountCents > ALLM4_LICENSE_PRICE_CENTS ||
+    amountCents > MAX_ALMA_PRODUCT_PRICE_CENTS ||
     currency !== "BRL"
   ) {
     return { valid: false, reason: "unexpected_amount_or_currency" };
@@ -130,19 +134,20 @@ export async function createPixPurchase({
 }) {
   await ensureCouponStorage();
   await ensureFinanceStorage();
+  const currentPriceCents = await getAlmaProductPriceCents();
   const prepared = await withTransaction(async (client) => {
     let coupon = null;
     let pricing = {
-      original_amount_cents: ALLM4_LICENSE_PRICE_CENTS,
+      original_amount_cents: currentPriceCents,
       discount_amount_cents: 0,
-      final_amount_cents: ALLM4_LICENSE_PRICE_CENTS,
+      final_amount_cents: currentPriceCents,
     };
 
     if (couponCode) {
       const validated = await lockCouponForPurchase(client, {
         couponCode,
         payerEmail,
-        baseAmountCents: ALLM4_LICENSE_PRICE_CENTS,
+        baseAmountCents: currentPriceCents,
       });
       coupon = validated.coupon;
       pricing = validated.pricing;
