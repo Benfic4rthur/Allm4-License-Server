@@ -5,6 +5,7 @@ import {
   createPixOrder,
   extractPixDetails,
   formatAmountFromCents,
+  searchMercadoPagoPaymentsByExternalReference,
 } from "../src/mercado-pago.js";
 
 process.env.MERCADO_PAGO_ACCESS_TOKEN = "APP_USR-test-token";
@@ -96,4 +97,36 @@ test("creates Pix order with authorization and idempotency headers", async () =>
   assert.equal(pix.qr_code, "000201-test");
   assert.equal(pix.qr_code_base64, "base64-test");
   assert.equal(pix.ticket_url, "https://example.com/ticket");
+});
+
+
+test("searches payments by external reference for Orders API reconciliation", async () => {
+  let capturedUrl;
+  const result = await searchMercadoPagoPaymentsByExternalReference(
+    "allm4_12345678-1234-4234-8234-123456789abc",
+    {
+      fetchImpl: async (url) => {
+        capturedUrl = url;
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            JSON.stringify({
+              paging: { total: 1 },
+              results: [{ id: 123456789, status: "approved" }],
+            }),
+        };
+      },
+    },
+  );
+
+  const url = new URL(capturedUrl);
+  assert.equal(url.pathname, "/v1/payments/search");
+  assert.equal(
+    url.searchParams.get("external_reference"),
+    "allm4_12345678-1234-4234-8234-123456789abc",
+  );
+  assert.equal(url.searchParams.get("sort"), "date_created");
+  assert.equal(url.searchParams.get("criteria"), "desc");
+  assert.equal(result.results[0].id, 123456789);
 });
