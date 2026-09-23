@@ -124,12 +124,18 @@ async function ensureBugSchema() {
         codex_retry_minutes INTEGER NOT NULL DEFAULT 30
           CHECK (codex_retry_minutes >= 5 AND codex_retry_minutes <= 1440),
         auto_assign_codex BOOLEAN NOT NULL DEFAULT TRUE,
+        triage_mode TEXT NOT NULL DEFAULT 'manual'
+          CHECK (triage_mode IN ('manual','timed')),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      ALTER TABLE bug_repair_settings
+        ADD COLUMN IF NOT EXISTS triage_mode TEXT NOT NULL DEFAULT 'manual'
+          CHECK (triage_mode IN ('manual','timed'));
+
       INSERT INTO bug_repair_settings (
-        id, manual_claim_minutes, codex_retry_minutes, auto_assign_codex
-      ) VALUES (1, 30, 30, TRUE)
+        id, manual_claim_minutes, codex_retry_minutes, auto_assign_codex, triage_mode
+      ) VALUES (1, 30, 30, FALSE, 'manual')
       ON CONFLICT (id) DO NOTHING;
 
       UPDATE bug_reports
@@ -167,7 +173,7 @@ async function ensureBugSchema() {
 
 async function repairSettingsForClient(client) {
   const result = await client.query(
-    `SELECT manual_claim_minutes, codex_retry_minutes, auto_assign_codex, updated_at
+    `SELECT manual_claim_minutes, codex_retry_minutes, auto_assign_codex, triage_mode, updated_at
      FROM bug_repair_settings
      WHERE id = 1
      LIMIT 1`,
@@ -180,14 +186,16 @@ async function repairSettingsForClient(client) {
     codex_retry_minutes: Number.isInteger(Number(row.codex_retry_minutes))
       ? Number(row.codex_retry_minutes)
       : DEFAULT_CODEX_RETRY_MINUTES,
-    auto_assign_codex: row.auto_assign_codex !== false,
+    triage_mode: row.triage_mode === "timed" ? "timed" : "manual",
+    auto_assign_codex:
+      row.triage_mode === "timed" && row.auto_assign_codex !== false,
     updated_at: row.updated_at || null,
   };
 }
 
 async function refreshAutomationReadiness(client) {
   const settings = await repairSettingsForClient(client);
-  if (!settings.auto_assign_codex) return settings;
+  if (settings.triage_mode !== "timed" || !settings.auto_assign_codex) return settings;
   await client.query(
     `UPDATE bug_reports
      SET automation_state = 'ready',
@@ -372,6 +380,7 @@ export async function updateBugRepairSettings(patch = {}) {
     patch.autoAssignCodex === undefined
       ? current.auto_assign_codex
       : patch.autoAssignCodex === true;
+  const triageMode = autoAssignCodex ? "timed" : "manual";
 
   if (
     !Number.isInteger(manualClaimMinutes) ||
@@ -391,16 +400,20 @@ export async function updateBugRepairSettings(patch = {}) {
      SET manual_claim_minutes = $1,
          codex_retry_minutes = $2,
          auto_assign_codex = $3,
+         triage_mode = $4,
          updated_at = NOW()
      WHERE id = 1
-     RETURNING manual_claim_minutes, codex_retry_minutes, auto_assign_codex, updated_at`,
-    [manualClaimMinutes, codexRetryMinutes, autoAssignCodex],
+     RETURNING manual_claim_minutes, codex_retry_minutes, auto_assign_codex, triage_mode, updated_at`,
+    [manualClaimMinutes, codexRetryMinutes, autoAssignCodex, triageMode],
   );
 
   return {
     manual_claim_minutes: Number(result.rows[0].manual_claim_minutes),
     codex_retry_minutes: Number(result.rows[0].codex_retry_minutes),
-    auto_assign_codex: result.rows[0].auto_assign_codex === true,
+    triage_mode: result.rows[0].triage_mode === "timed" ? "timed" : "manual",
+    auto_assign_codex:
+      result.rows[0].triage_mode === "timed" &&
+      result.rows[0].auto_assign_codex === true,
     updated_at: result.rows[0].updated_at,
   };
 }
@@ -760,6 +773,69 @@ function claimConflict(code, message) {
   return error;
 }
 
+export async function dispatchBugToCodex(number, note = "") {
+  await ensureBugSchema();
+  const numeric = Number(number);
+  if (!Number.isInteger(numeric) || numeric < 1) return null;
+
+  return withTransaction(async (client) => {
+    const result = await client.query(
+      "SELECT * FROM bug_reports WHERE number = $1 FOR UPDATE",
+      [numeric],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    const currentAssignee = normalizeAssignee(row.assigned_to);
+    if (["resolved", "update_available"].includes(row.status)) {
+      throw claimConflict("bug_claim_conflict", "bug is already resolved");
+    }
+    if (currentAssignee === "manual") {
+      throw claimConflict("bug_claim_conflict", "bug is reserved for manual handling");
+    }
+    if (currentAssignee === "codex") {
+      return toMaintainerReport(row);
+    }
+
+    const nextStatus = row.status === "reported" ? "received" : row.status;
+    const safeNote = normalizeText(
+      note,
+      1000,
+      "Bug delegado manualmente ao Codex pelo Allm4 Admin.",
+    );
+    const updated = await client.query(
+      `UPDATE bug_reports
+       SET status = $2,
+           assigned_to = 'codex',
+           automation_state = 'ready',
+           automation_last_error = NULL,
+           automation_retry_at = NULL,
+           maintainer_note = $3,
+           updated_at = NOW()
+       WHERE number = $1
+       RETURNING *`,
+      [numeric, nextStatus, safeNote],
+    );
+    const next = updated.rows[0];
+
+    await client.query(
+      "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, $2, $3, $4::jsonb)",
+      [
+        next.id,
+        nextStatus,
+        safeNote,
+        JSON.stringify({
+          assigned_to: "codex",
+          automation_state: "ready",
+          delegated_by: "admin",
+        }),
+      ],
+    );
+
+    return toMaintainerReport(next);
+  });
+}
+
 export async function claimBugReport(number, note = "", assignee = "codex") {
   await ensureBugSchema();
   const numeric = Number(number);
@@ -794,7 +870,7 @@ export async function claimBugReport(number, note = "", assignee = "codex") {
         throw claimConflict("bug_claim_conflict", "bug is reserved for manual handling");
       }
       if (currentAssignee === "unassigned") {
-        if (!settings.auto_assign_codex) {
+        if (settings.triage_mode !== "timed" || !settings.auto_assign_codex) {
           throw claimConflict("bug_automation_disabled", "automatic handling is disabled");
         }
         if (manualUntil && manualUntil > now) {
@@ -893,6 +969,8 @@ export async function markBugAutomationUnavailable(number, reason = "", note = "
     }
 
     const settings = await repairSettingsForClient(client);
+    const retryEnabled =
+      settings.triage_mode === "timed" && settings.auto_assign_codex;
     const safeReason = redactText(normalizeText(reason, 4000, "Codex indisponível."));
     const safeNote = redactText(
       normalizeText(
@@ -908,14 +986,18 @@ export async function markBugAutomationUnavailable(number, reason = "", note = "
            assigned_to = 'unassigned',
            automation_state = 'unavailable',
            automation_last_error = $2,
-           automation_retry_at = NOW() + make_interval(mins => $3::int),
-           maintainer_note = $4,
+           automation_retry_at = CASE
+             WHEN $3::boolean THEN NOW() + make_interval(mins => $4::int)
+             ELSE NULL
+           END,
+           maintainer_note = $5,
            updated_at = NOW()
        WHERE number = $1
        RETURNING *`,
       [
         numeric,
         safeReason,
+        retryEnabled,
         settings.codex_retry_minutes,
         safeNote,
       ],
