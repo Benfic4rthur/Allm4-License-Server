@@ -966,6 +966,76 @@ export async function claimBugReport(number, note = "", assignee = "codex") {
   });
 }
 
+export async function returnBugToTriage(number, note = "") {
+  await ensureBugSchema();
+  const numeric = Number(number);
+  if (!Number.isInteger(numeric) || numeric < 1) return null;
+
+  return withTransaction(async (client) => {
+    const result = await client.query(
+      "SELECT * FROM bug_reports WHERE number = $1 FOR UPDATE",
+      [numeric],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    const currentAssignee = normalizeAssignee(row.assigned_to);
+    if (currentAssignee === "codex") {
+      throw claimConflict(
+        "bug_claim_conflict",
+        "bug is currently assigned to Codex",
+      );
+    }
+    if (["resolved", "update_available"].includes(row.status)) {
+      throw claimConflict(
+        "bug_claim_conflict",
+        "resolved bug cannot return to triage",
+      );
+    }
+
+    const settings = await repairSettingsForClient(client);
+    const safeNote = redactText(
+      normalizeText(
+        note,
+        2000,
+        "Bug retornado à triagem pelo Allm4 Admin.",
+      ),
+    );
+
+    const updated = await client.query(
+      `UPDATE bug_reports
+       SET status = 'reported',
+           assigned_to = 'unassigned',
+           manual_claim_until = NOW() + make_interval(mins => $2::int),
+           automation_state = 'waiting_manual',
+           automation_last_error = NULL,
+           automation_retry_at = NULL,
+           claimed_at = NULL,
+           resolved_at = NULL,
+           updated_at = NOW()
+       WHERE number = $1
+       RETURNING *`,
+      [numeric, settings.manual_claim_minutes],
+    );
+    const next = updated.rows[0];
+
+    await client.query(
+      "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, 'reported', $2, $3::jsonb)",
+      [
+        next.id,
+        safeNote,
+        JSON.stringify({
+          assigned_to: "unassigned",
+          automation_state: "waiting_manual",
+          returned_to_triage: true,
+        }),
+      ],
+    );
+
+    return toMaintainerReport(next);
+  });
+}
+
 export async function markBugAutomationUnavailable(number, reason = "", note = "") {
   await ensureBugSchema();
   const numeric = Number(number);

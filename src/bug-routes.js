@@ -9,6 +9,7 @@ import {
   listMaintainerQueue,
   listMaintainerReports,
   markBugAutomationUnavailable,
+  returnBugToTriage,
   updateBugRepairSettings,
   updateBugReport,
 } from "./bug-service.js";
@@ -192,6 +193,19 @@ router.post("/admin/bugs/:bugId/claim", requireMaintainer, async (req, res) => {
     if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
     const body = getObjectBody(req);
     const report = await claimBugReport(number, body.note, body.assignee);
+    if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    return res.status(200).json({ ok: true, bug: report });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/admin/bugs/:bugId/return-triage", requireMaintainer, async (req, res) => {
+  try {
+    const number = parsePublicNumber(req.params.bugId);
+    if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    const body = getObjectBody(req);
+    const report = await returnBugToTriage(number, body.note);
     if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
     return res.status(200).json({ ok: true, bug: report });
   } catch (error) {
