@@ -12,6 +12,7 @@ import {
   extractPixDetails,
   getMercadoPagoPayment,
   inspectMercadoPagoPaymentFinancials,
+  searchMercadoPagoPaymentsByExternalReference,
 } from "./mercado-pago.js";
 import { ensurePurchaseLicense } from "./purchase-license-service.js";
 import {
@@ -287,7 +288,10 @@ export async function getPurchaseStatusForClient({ purchaseId, lookupToken }) {
 
 export async function syncMercadoPagoPurchaseFromOrder(
   order,
-  { fetchPayment = getMercadoPagoPayment } = {},
+  {
+    fetchPayment = getMercadoPagoPayment,
+    searchPayments = searchMercadoPagoPaymentsByExternalReference,
+  } = {},
 ) {
   await ensureCouponStorage();
   await ensureFinanceStorage();
@@ -315,6 +319,51 @@ export async function syncMercadoPagoPurchaseFromOrder(
       console.warn("[Purchase API] Mercado Pago payment financial lookup failed", {
         order_id: inspected.orderId,
         payment_id: orderPaymentId,
+        error: error?.message ?? String(error),
+      });
+    }
+  }
+
+  if (inspected.purchaseStatus === "approved" && !paymentFinancials) {
+    const externalReference = `allm4_${inspected.purchaseId}`;
+    try {
+      const searchResult = await searchPayments(externalReference);
+      const candidates = Array.isArray(searchResult?.results)
+        ? searchResult.results
+        : [];
+
+      for (const candidate of candidates) {
+        if (
+          candidate?.status &&
+          candidate.status !== "approved" &&
+          candidate.status !== "authorized"
+        ) {
+          continue;
+        }
+
+        let inspectedPayment = inspectMercadoPagoPaymentFinancials(candidate);
+        if (!inspectedPayment.valid && candidate?.id) {
+          try {
+            const fullPayment = await fetchPayment(candidate.id);
+            inspectedPayment = inspectMercadoPagoPaymentFinancials(fullPayment);
+          } catch {
+            continue;
+          }
+        }
+
+        if (
+          inspectedPayment.valid &&
+          (inspectedPayment.transactionAmountCents === null ||
+            inspectedPayment.transactionAmountCents === inspected.amountCents)
+        ) {
+          paymentFinancials = inspectedPayment;
+          break;
+        }
+      }
+    } catch (error) {
+      console.warn("[Purchase API] Mercado Pago payment search failed", {
+        order_id: inspected.orderId,
+        external_reference: externalReference,
         error: error?.message ?? String(error),
       });
     }
