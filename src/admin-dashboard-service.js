@@ -10,6 +10,7 @@ import {
   getMercadoPagoOrder,
   getMercadoPagoPayment,
   inspectMercadoPagoPaymentFinancials,
+  searchMercadoPagoPaymentsByExternalReference,
 } from "./mercado-pago.js";
 import { syncMercadoPagoPurchaseFromOrder } from "./purchase-service.js";
 import { derivePurchaseLicenseKey } from "./security.js";
@@ -21,6 +22,8 @@ function number(value) {
 function nullableNumber(value) {
   return value === null || value === undefined ? null : Number(value);
 }
+
+let historicalFinanceRecoveryPromise = null;
 
 function mapSale(row) {
   return {
@@ -109,6 +112,7 @@ export async function getAdminDashboard({ from, to, includeArchived = false }) {
   await ensureCouponStorage();
   await ensureFinanceStorage();
   await ensureAdminVisibilityStorage();
+  await recoverResolvedHistoricalFinancials();
   const pool = getPool();
 
   const [sales, current, couponPerformance, series] = await Promise.all([
@@ -440,7 +444,108 @@ async function recoverLegacyPurchaseFinancials(row, order = null) {
     }
   }
 
+  const externalReference = `allm4_${row.id}`;
+  try {
+    const searchResult =
+      await searchMercadoPagoPaymentsByExternalReference(externalReference);
+    const candidates = Array.isArray(searchResult?.results)
+      ? searchResult.results
+      : [];
+
+    for (const candidate of candidates) {
+      if (
+        candidate?.status &&
+        candidate.status !== "approved" &&
+        candidate.status !== "authorized"
+      ) {
+        continue;
+      }
+
+      let financials = inspectMercadoPagoPaymentFinancials(candidate);
+      if (!financials.valid && candidate?.id) {
+        try {
+          financials = inspectMercadoPagoPaymentFinancials(
+            await getMercadoPagoPayment(candidate.id),
+          );
+        } catch {
+          continue;
+        }
+      }
+
+      if (
+        !financials.valid ||
+        (financials.transactionAmountCents !== null &&
+          financials.transactionAmountCents !== number(row.amount_cents))
+      ) {
+        continue;
+      }
+
+      const updated = await getPool().query(
+        `UPDATE purchases
+         SET provider_transaction_id = $2,
+             provider_fee_cents = $3,
+             net_received_amount_cents = $4,
+             provider_financial_updated_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1
+           AND admin_archived_at IS NULL
+         RETURNING id`,
+        [
+          row.id,
+          financials.paymentId,
+          financials.providerFeeCents,
+          financials.netReceivedAmountCents,
+        ],
+      );
+
+      if (updated.rowCount > 0) return true;
+    }
+  } catch (error) {
+    console.warn("[Admin Dashboard] legacy payment search failed", {
+      purchase_id: row.id,
+      external_reference: externalReference,
+      error: error?.message ?? String(error),
+    });
+  }
+
   return false;
+}
+
+async function recoverResolvedHistoricalFinancials() {
+  if (!historicalFinanceRecoveryPromise) {
+    historicalFinanceRecoveryPromise = (async () => {
+      const result = await getPool().query(
+        `SELECT
+           id, provider_payment_id, provider_transaction_id, amount_cents
+         FROM purchases
+         WHERE provider = 'mercado_pago'
+           AND status = 'approved'
+           AND admin_archived_at IS NULL
+           AND admin_financial_resolved_at IS NOT NULL
+           AND net_received_amount_cents IS NULL
+         ORDER BY COALESCE(paid_at, created_at) DESC
+         LIMIT 10`,
+      );
+
+      for (const row of result.rows) {
+        let order = null;
+        if (row.provider_payment_id) {
+          try {
+            order = await getMercadoPagoOrder(row.provider_payment_id);
+          } catch {
+            order = null;
+          }
+        }
+        await recoverLegacyPurchaseFinancials(row, order);
+      }
+    })().catch((error) => {
+      console.warn("[Admin Dashboard] historical finance recovery failed", {
+        error: error?.message ?? String(error),
+      });
+    });
+  }
+
+  await historicalFinanceRecoveryPromise;
 }
 
 export async function reconcileAdminSales({ limit = 25 } = {}) {

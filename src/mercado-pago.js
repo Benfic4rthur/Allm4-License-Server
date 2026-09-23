@@ -150,6 +150,26 @@ export async function getMercadoPagoPayment(paymentId, { fetchImpl = fetch } = {
   });
 }
 
+export async function searchMercadoPagoPaymentsByExternalReference(
+  externalReference,
+  { fetchImpl = fetch } = {},
+) {
+  if (typeof externalReference !== "string" || !externalReference.trim()) {
+    throw new TypeError("Invalid external reference");
+  }
+
+  const query = new URLSearchParams({
+    external_reference: externalReference.trim(),
+    sort: "date_created",
+    criteria: "desc",
+    limit: "10",
+  });
+
+  return mercadoPagoRequest(`/v1/payments/search?${query.toString()}`, {
+    fetchImpl,
+  });
+}
+
 export function extractMercadoPagoOrderPaymentId(order) {
   const payment = order?.transactions?.payments?.[0] ?? null;
   const referenceId = payment?.reference_id;
