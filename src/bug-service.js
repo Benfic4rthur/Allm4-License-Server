@@ -300,6 +300,11 @@ function toMaintainerReport(row) {
     pull_request_url: row.pull_request_url || null,
     release_version: row.release_version || null,
     maintainer_note: row.maintainer_note || null,
+    assigned_to: normalizeAssignee(row.assigned_to),
+    manual_claim_until: row.manual_claim_until || null,
+    automation_state: normalizeAutomationState(row.automation_state),
+    automation_last_error: row.automation_last_error || null,
+    automation_retry_at: row.automation_retry_at || null,
     claimed_at: row.claimed_at || null,
     resolved_at: row.resolved_at || null,
     created_at: row.created_at,
@@ -324,10 +329,70 @@ function toMaintainerSummary(row) {
     github_branch: row.github_branch || null,
     pull_request_url: row.pull_request_url || null,
     release_version: row.release_version || null,
+    assigned_to: normalizeAssignee(row.assigned_to),
+    manual_claim_until: row.manual_claim_until || null,
+    automation_state: normalizeAutomationState(row.automation_state),
+    automation_last_error: row.automation_last_error || null,
+    automation_retry_at: row.automation_retry_at || null,
     claimed_at: row.claimed_at || null,
     resolved_at: row.resolved_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+  };
+}
+
+export async function getBugRepairSettings() {
+  await ensureBugSchema();
+  return repairSettingsForClient(getPool());
+}
+
+export async function updateBugRepairSettings(patch = {}) {
+  await ensureBugSchema();
+  const pool = getPool();
+  const current = await repairSettingsForClient(pool);
+
+  const manualClaimMinutes =
+    patch.manualClaimMinutes === undefined
+      ? current.manual_claim_minutes
+      : Number(patch.manualClaimMinutes);
+  const codexRetryMinutes =
+    patch.codexRetryMinutes === undefined
+      ? current.codex_retry_minutes
+      : Number(patch.codexRetryMinutes);
+  const autoAssignCodex =
+    patch.autoAssignCodex === undefined
+      ? current.auto_assign_codex
+      : patch.autoAssignCodex === true;
+
+  if (
+    !Number.isInteger(manualClaimMinutes) ||
+    manualClaimMinutes < 0 ||
+    manualClaimMinutes > 1440 ||
+    !Number.isInteger(codexRetryMinutes) ||
+    codexRetryMinutes < 5 ||
+    codexRetryMinutes > 1440
+  ) {
+    const error = new Error("invalid bug repair settings");
+    error.code = "invalid_request";
+    throw error;
+  }
+
+  const result = await pool.query(
+    `UPDATE bug_repair_settings
+     SET manual_claim_minutes = $1,
+         codex_retry_minutes = $2,
+         auto_assign_codex = $3,
+         updated_at = NOW()
+     WHERE id = 1
+     RETURNING manual_claim_minutes, codex_retry_minutes, auto_assign_codex, updated_at`,
+    [manualClaimMinutes, codexRetryMinutes, autoAssignCodex],
+  );
+
+  return {
+    manual_claim_minutes: Number(result.rows[0].manual_claim_minutes),
+    codex_retry_minutes: Number(result.rows[0].codex_retry_minutes),
+    auto_assign_codex: result.rows[0].auto_assign_codex === true,
+    updated_at: result.rows[0].updated_at,
   };
 }
 
