@@ -422,6 +422,7 @@ export async function createBugReport(input) {
   });
 
   const result = await withTransaction(async (client) => {
+    const repairSettings = await repairSettingsForClient(client);
     let existing = null;
     if (signatureHash) {
       const matched = await client.query(
@@ -447,6 +448,14 @@ export async function createBugReport(input) {
              pull_request_url = CASE WHEN $2 THEN NULL ELSE pull_request_url END,
              release_version = CASE WHEN $2 THEN NULL ELSE release_version END,
              maintainer_note = CASE WHEN $2 THEN NULL ELSE maintainer_note END,
+             assigned_to = CASE WHEN $2 THEN 'unassigned' ELSE assigned_to END,
+             manual_claim_until = CASE
+               WHEN $2 THEN NOW() + make_interval(mins => $10::int)
+               ELSE manual_claim_until
+             END,
+             automation_state = CASE WHEN $2 THEN 'waiting_manual' ELSE automation_state END,
+             automation_last_error = CASE WHEN $2 THEN NULL ELSE automation_last_error END,
+             automation_retry_at = CASE WHEN $2 THEN NULL ELSE automation_retry_at END,
              app_version = $3,
              platform = COALESCE(NULLIF($4, ''), platform),
              arch = COALESCE(NULLIF($5, ''), arch),
@@ -467,6 +476,7 @@ export async function createBugReport(input) {
           errorContext,
           JSON.stringify(diagnostics),
           description,
+          repairSettings.manual_claim_minutes,
         ],
       );
       const row = updated.rows[0];
@@ -526,8 +536,16 @@ export async function createBugReport(input) {
         error_message,
         error_context,
         signature_hash,
-        diagnostics
-      ) VALUES ($1, 'reported', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+        diagnostics,
+        assigned_to,
+        manual_claim_until,
+        automation_state
+      ) VALUES (
+        $1, 'reported', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb,
+        'unassigned',
+        NOW() + make_interval(mins => $12::int),
+        'waiting_manual'
+      )
       RETURNING *`,
       [
         trackingTokenHash,
@@ -541,6 +559,7 @@ export async function createBugReport(input) {
         errorContext || null,
         signatureHash,
         JSON.stringify(diagnostics),
+        repairSettings.manual_claim_minutes,
       ],
     );
     const row = inserted.rows[0];
