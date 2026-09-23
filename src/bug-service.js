@@ -973,6 +973,18 @@ export async function updateBugReport(number, patch = {}) {
            pull_request_url = $6,
            release_version = $7,
            maintainer_note = $8,
+           automation_state = CASE
+             WHEN $2 IN ('resolved', 'update_available') THEN 'complete'
+             ELSE automation_state
+           END,
+           automation_last_error = CASE
+             WHEN $2 IN ('resolved', 'update_available') THEN NULL
+             ELSE automation_last_error
+           END,
+           automation_retry_at = CASE
+             WHEN $2 IN ('resolved', 'update_available') THEN NULL
+             ELSE automation_retry_at
+           END,
            resolved_at = ${resolvedAt},
            updated_at = NOW()
        WHERE number = $1
