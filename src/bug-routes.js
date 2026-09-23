@@ -2,6 +2,7 @@ import express from "express";
 import {
   claimBugReport,
   createBugReport,
+  dispatchBugToCodex,
   getBugReportForClient,
   getBugRepairSettings,
   getMaintainerBugReport,
@@ -165,6 +166,19 @@ router.get("/admin/bugs/:bugId", requireMaintainer, async (req, res) => {
     const number = parsePublicNumber(req.params.bugId);
     if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
     const report = await getMaintainerBugReport(number);
+    if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    return res.status(200).json({ ok: true, bug: report });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/admin/bugs/:bugId/dispatch-codex", requireMaintainer, async (req, res) => {
+  try {
+    const number = parsePublicNumber(req.params.bugId);
+    if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    const body = getObjectBody(req);
+    const report = await dispatchBugToCodex(number, body.note);
     if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
     return res.status(200).json({ ok: true, bug: report });
   } catch (error) {
