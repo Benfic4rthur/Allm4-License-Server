@@ -740,7 +740,7 @@ export async function listMaintainerQueue(limit = 20) {
     `SELECT * FROM bug_reports
      WHERE (
        assigned_to = 'codex'
-       AND status IN ('working', 'changes_ready', 'awaiting_approval', 'blocked')
+       AND status IN ('received', 'working', 'changes_ready', 'awaiting_approval', 'blocked')
      ) OR (
        $2::boolean = TRUE
        AND assigned_to = 'unassigned'
@@ -755,9 +755,10 @@ export async function listMaintainerQueue(limit = 20) {
          WHEN assigned_to = 'codex' AND status = 'working' THEN 0
          WHEN assigned_to = 'codex' AND status = 'changes_ready' THEN 1
          WHEN assigned_to = 'codex' AND status = 'awaiting_approval' THEN 2
-         WHEN assigned_to = 'codex' AND status = 'blocked' THEN 3
-         WHEN assigned_to = 'unassigned' AND automation_state = 'ready' THEN 4
-         ELSE 5
+         WHEN assigned_to = 'codex' AND status = 'received' THEN 3
+         WHEN assigned_to = 'codex' AND status = 'blocked' THEN 4
+         WHEN assigned_to = 'unassigned' AND automation_state = 'ready' THEN 5
+         ELSE 6
        END,
        COALESCE(automation_retry_at, manual_claim_until, created_at) ASC,
        created_at ASC
@@ -797,7 +798,9 @@ export async function dispatchBugToCodex(number, note = "") {
       return toMaintainerReport(row);
     }
 
-    const nextStatus = row.status === "reported" ? "received" : row.status;
+    const nextStatus = ["reported", "blocked"].includes(row.status)
+      ? "received"
+      : row.status;
     const safeNote = normalizeText(
       note,
       1000,
