@@ -206,6 +206,30 @@ function toMaintainerReport(row) {
   };
 }
 
+function toMaintainerSummary(row) {
+  return {
+    id: publicId(row.number),
+    number: Number(row.number),
+    status: row.status,
+    title: row.title,
+    module: row.module || "",
+    app_version: row.app_version,
+    platform: row.platform || "",
+    arch: row.arch || "",
+    error_message: row.error_message || "",
+    duplicate_count: Number(row.duplicate_count || 1),
+    github_issue_number: row.github_issue_number || null,
+    github_issue_url: row.github_issue_url || null,
+    github_branch: row.github_branch || null,
+    pull_request_url: row.pull_request_url || null,
+    release_version: row.release_version || null,
+    claimed_at: row.claimed_at || null,
+    resolved_at: row.resolved_at || null,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
 export async function createBugReport(input) {
   await ensureBugSchema();
   const title = normalizeText(input.title, 180, "Erro reportado pelo Allm4");
@@ -446,7 +470,7 @@ export async function listMaintainerReports(limit = 200) {
      LIMIT $1`,
     [safeLimit],
   );
-  return result.rows.map(toMaintainerReport);
+  return result.rows.map(toMaintainerSummary);
 }
 
 export async function getMaintainerBugReport(number) {
