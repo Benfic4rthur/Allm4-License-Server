@@ -133,6 +133,15 @@ async function ensureBugSchema() {
       ON CONFLICT (id) DO NOTHING;
 
       UPDATE bug_reports
+      SET assigned_to = 'codex',
+          automation_state = 'running'
+      WHERE assigned_to = 'unassigned'
+        AND automation_state = 'waiting_manual'
+        AND status IN (
+          'working','changes_ready','awaiting_approval','merging','releasing','blocked'
+        );
+
+      UPDATE bug_reports
       SET manual_claim_until = COALESCE(
         manual_claim_until,
         created_at + (
