@@ -5,10 +5,10 @@ import {
 } from "./coupon-service.js";
 import { MercadoPagoApiError } from "./mercado-pago.js";
 import {
-  ALLM4_LICENSE_PRICE_CENTS,
   createPixPurchase,
   getPurchaseStatusForClient,
 } from "./purchase-service.js";
+import { getAlmaProductPriceCents } from "./product-settings-service.js";
 import { SecurityConfigurationError } from "./security.js";
 
 const router = express.Router();
@@ -106,7 +106,7 @@ router.post("/coupons/validate", async (req, res) => {
     const result = await previewCoupon({
       couponCode: couponCode.value,
       payerEmail,
-      baseAmountCents: ALLM4_LICENSE_PRICE_CENTS,
+      baseAmountCents: await getAlmaProductPriceCents(),
     });
 
     return res.status(200).json({
