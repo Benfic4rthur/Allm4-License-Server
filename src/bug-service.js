@@ -18,7 +18,18 @@ const PUBLIC_STATUSES = new Set([
   "blocked",
 ]);
 
+const BUG_ASSIGNEES = new Set(["unassigned", "manual", "codex"]);
+const AUTOMATION_STATES = new Set([
+  "waiting_manual",
+  "ready",
+  "running",
+  "unavailable",
+  "manual",
+  "complete",
+]);
 const MAX_DIAGNOSTICS_CHARS = 90000;
+const DEFAULT_MANUAL_CLAIM_MINUTES = 30;
+const DEFAULT_CODEX_RETRY_MINUTES = 30;
 let schemaReady = null;
 
 async function ensureBugSchema() {
@@ -93,12 +104,102 @@ async function ensureBugSchema() {
       CREATE INDEX IF NOT EXISTS idx_bug_report_events_bug ON bug_report_events(bug_report_id, created_at ASC);
       CREATE INDEX IF NOT EXISTS idx_bug_report_watchers_bug ON bug_report_watchers(bug_report_id);
       CREATE INDEX IF NOT EXISTS idx_bug_report_occurrences_bug ON bug_report_occurrences(bug_report_id, created_at DESC);
+
+      ALTER TABLE bug_reports
+        ADD COLUMN IF NOT EXISTS assigned_to TEXT NOT NULL DEFAULT 'unassigned'
+          CHECK (assigned_to IN ('unassigned','manual','codex')),
+        ADD COLUMN IF NOT EXISTS manual_claim_until TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS automation_state TEXT NOT NULL DEFAULT 'waiting_manual'
+          CHECK (automation_state IN ('waiting_manual','ready','running','unavailable','manual','complete')),
+        ADD COLUMN IF NOT EXISTS automation_last_error TEXT,
+        ADD COLUMN IF NOT EXISTS automation_retry_at TIMESTAMPTZ;
+
+      CREATE INDEX IF NOT EXISTS idx_bug_reports_assignment
+        ON bug_reports(assigned_to, automation_state, manual_claim_until, automation_retry_at);
+
+      CREATE TABLE IF NOT EXISTS bug_repair_settings (
+        id SMALLINT PRIMARY KEY CHECK (id = 1),
+        manual_claim_minutes INTEGER NOT NULL DEFAULT 30
+          CHECK (manual_claim_minutes >= 0 AND manual_claim_minutes <= 1440),
+        codex_retry_minutes INTEGER NOT NULL DEFAULT 30
+          CHECK (codex_retry_minutes >= 5 AND codex_retry_minutes <= 1440),
+        auto_assign_codex BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      INSERT INTO bug_repair_settings (
+        id, manual_claim_minutes, codex_retry_minutes, auto_assign_codex
+      ) VALUES (1, 30, 30, TRUE)
+      ON CONFLICT (id) DO NOTHING;
+
+      UPDATE bug_reports
+      SET manual_claim_until = COALESCE(
+        manual_claim_until,
+        created_at + (
+          SELECT make_interval(mins => manual_claim_minutes)
+          FROM bug_repair_settings
+          WHERE id = 1
+        )
+      )
+      WHERE manual_claim_until IS NULL
+        AND status NOT IN ('resolved', 'update_available');
+
+      UPDATE bug_reports
+      SET automation_state = 'complete'
+      WHERE status IN ('resolved', 'update_available')
+        AND automation_state <> 'complete';
     `).catch((error) => {
       schemaReady = null;
       throw error;
     });
   }
   return schemaReady;
+}
+
+async function repairSettingsForClient(client) {
+  const result = await client.query(
+    `SELECT manual_claim_minutes, codex_retry_minutes, auto_assign_codex, updated_at
+     FROM bug_repair_settings
+     WHERE id = 1
+     LIMIT 1`,
+  );
+  const row = result.rows[0] || {};
+  return {
+    manual_claim_minutes: Number.isInteger(Number(row.manual_claim_minutes))
+      ? Number(row.manual_claim_minutes)
+      : DEFAULT_MANUAL_CLAIM_MINUTES,
+    codex_retry_minutes: Number.isInteger(Number(row.codex_retry_minutes))
+      ? Number(row.codex_retry_minutes)
+      : DEFAULT_CODEX_RETRY_MINUTES,
+    auto_assign_codex: row.auto_assign_codex !== false,
+    updated_at: row.updated_at || null,
+  };
+}
+
+async function refreshAutomationReadiness(client) {
+  const settings = await repairSettingsForClient(client);
+  if (!settings.auto_assign_codex) return settings;
+  await client.query(
+    `UPDATE bug_reports
+     SET automation_state = 'ready',
+         updated_at = NOW()
+     WHERE assigned_to = 'unassigned'
+       AND automation_state = 'waiting_manual'
+       AND status IN ('reported', 'received', 'blocked')
+       AND manual_claim_until IS NOT NULL
+       AND manual_claim_until <= NOW()`,
+  );
+  return settings;
+}
+
+function normalizeAssignee(value, fallback = "unassigned") {
+  const normalized = normalizeText(value, 32, fallback);
+  return BUG_ASSIGNEES.has(normalized) ? normalized : fallback;
+}
+
+function normalizeAutomationState(value, fallback = "waiting_manual") {
+  const normalized = normalizeText(value, 40, fallback);
+  return AUTOMATION_STATES.has(normalized) ? normalized : fallback;
 }
 
 function normalizeText(value, maxLength, fallback = "") {
