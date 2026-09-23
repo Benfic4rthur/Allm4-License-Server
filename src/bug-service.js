@@ -649,6 +649,7 @@ export async function listMaintainerReports(limit = 200) {
   await ensureBugSchema();
   const safeLimit = Math.max(1, Math.min(500, Number(limit) || 200));
   const pool = getPool();
+  await refreshAutomationReadiness(pool);
   const result = await pool.query(
     `SELECT * FROM bug_reports
      ORDER BY updated_at DESC, created_at DESC
@@ -664,6 +665,7 @@ export async function getMaintainerBugReport(number) {
   if (!Number.isInteger(numeric) || numeric < 1) return null;
 
   const pool = getPool();
+  await refreshAutomationReadiness(pool);
   const result = await pool.query(
     "SELECT * FROM bug_reports WHERE number = $1 LIMIT 1",
     [numeric],
@@ -711,26 +713,160 @@ export async function listMaintainerQueue(limit = 20) {
   await ensureBugSchema();
   const safeLimit = Math.max(1, Math.min(100, Number(limit) || 20));
   const pool = getPool();
+  const settings = await refreshAutomationReadiness(pool);
   const result = await pool.query(
     `SELECT * FROM bug_reports
-     WHERE status IN ('reported', 'received', 'working', 'changes_ready', 'awaiting_approval', 'blocked')
+     WHERE (
+       assigned_to = 'codex'
+       AND status IN ('working', 'changes_ready', 'awaiting_approval', 'blocked')
+     ) OR (
+       $2::boolean = TRUE
+       AND assigned_to = 'unassigned'
+       AND status IN ('reported', 'received', 'blocked')
+       AND manual_claim_until IS NOT NULL
+       AND manual_claim_until <= NOW()
+       AND (automation_retry_at IS NULL OR automation_retry_at <= NOW())
+       AND automation_state IN ('ready', 'unavailable')
+     )
      ORDER BY
-       CASE status
-         WHEN 'working' THEN 0
-         WHEN 'changes_ready' THEN 1
-         WHEN 'awaiting_approval' THEN 2
-         WHEN 'received' THEN 3
-         WHEN 'reported' THEN 4
+       CASE
+         WHEN assigned_to = 'codex' AND status = 'working' THEN 0
+         WHEN assigned_to = 'codex' AND status = 'changes_ready' THEN 1
+         WHEN assigned_to = 'codex' AND status = 'awaiting_approval' THEN 2
+         WHEN assigned_to = 'codex' AND status = 'blocked' THEN 3
+         WHEN assigned_to = 'unassigned' AND automation_state = 'ready' THEN 4
          ELSE 5
        END,
+       COALESCE(automation_retry_at, manual_claim_until, created_at) ASC,
        created_at ASC
      LIMIT $1`,
-    [safeLimit],
+    [safeLimit, settings.auto_assign_codex],
   );
   return result.rows.map(toMaintainerReport);
 }
 
-export async function claimBugReport(number, note = "") {
+function claimConflict(code, message) {
+  const error = new Error(message || code);
+  error.code = code;
+  return error;
+}
+
+export async function claimBugReport(number, note = "", assignee = "codex") {
+  await ensureBugSchema();
+  const numeric = Number(number);
+  if (!Number.isInteger(numeric) || numeric < 1) return null;
+  const requestedAssignee = normalizeAssignee(assignee, "");
+  if (!requestedAssignee || requestedAssignee === "unassigned") {
+    const error = new Error("invalid assignee");
+    error.code = "invalid_request";
+    throw error;
+  }
+
+  return withTransaction(async (client) => {
+    const result = await client.query(
+      "SELECT * FROM bug_reports WHERE number = $1 FOR UPDATE",
+      [numeric],
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+
+    const currentAssignee = normalizeAssignee(row.assigned_to);
+    const settings = await repairSettingsForClient(client);
+    const now = Date.now();
+    const manualUntil = row.manual_claim_until ? new Date(row.manual_claim_until).getTime() : 0;
+    const retryAt = row.automation_retry_at ? new Date(row.automation_retry_at).getTime() : 0;
+
+    if (["resolved", "update_available"].includes(row.status)) {
+      throw claimConflict("bug_claim_conflict", "bug is already resolved");
+    }
+
+    if (requestedAssignee === "codex") {
+      if (currentAssignee === "manual") {
+        throw claimConflict("bug_claim_conflict", "bug is reserved for manual handling");
+      }
+      if (currentAssignee === "unassigned") {
+        if (!settings.auto_assign_codex) {
+          throw claimConflict("bug_automation_disabled", "automatic handling is disabled");
+        }
+        if (manualUntil && manualUntil > now) {
+          throw claimConflict("bug_claim_window_open", "manual claim window is still open");
+        }
+        if (retryAt && retryAt > now) {
+          throw claimConflict("bug_automation_deferred", "automatic retry is deferred");
+        }
+      }
+    }
+
+    if (
+      requestedAssignee === "manual" &&
+      currentAssignee === "codex" &&
+      row.status !== "blocked"
+    ) {
+      throw claimConflict("bug_claim_conflict", "bug is already being handled by Codex");
+    }
+
+    if (
+      currentAssignee === requestedAssignee &&
+      !["reported", "received", "blocked"].includes(row.status)
+    ) {
+      return toMaintainerReport(row);
+    }
+
+    if (row.status === "reported") {
+      await client.query(
+        "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, 'received', $2, $3::jsonb)",
+        [
+          row.id,
+          "Relatório recebido pela fila de manutenção.",
+          JSON.stringify({ assigned_to: requestedAssignee }),
+        ],
+      );
+    }
+
+    const nextStatus = "working";
+    const automationState = requestedAssignee === "manual" ? "manual" : "running";
+    const updated = await client.query(
+      `UPDATE bug_reports
+       SET status = 'working',
+           assigned_to = $2,
+           automation_state = $3,
+           automation_last_error = CASE WHEN $2 = 'codex' THEN NULL ELSE automation_last_error END,
+           automation_retry_at = CASE WHEN $2 = 'codex' THEN NULL ELSE automation_retry_at END,
+           claimed_at = COALESCE(claimed_at, NOW()),
+           maintainer_note = COALESCE(NULLIF($4, ''), maintainer_note),
+           updated_at = NOW()
+       WHERE number = $1
+       RETURNING *`,
+      [
+        numeric,
+        requestedAssignee,
+        automationState,
+        normalizeText(note, 1000),
+      ],
+    );
+    const next = updated.rows[0];
+
+    await client.query(
+      "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, $2, $3, $4::jsonb)",
+      [
+        next.id,
+        nextStatus,
+        normalizeText(
+          note,
+          1000,
+          requestedAssignee === "manual"
+            ? "Atendimento manual iniciado pelo administrador."
+            : "Atendimento automático iniciado pelo Allm4 Maintainer.",
+        ),
+        JSON.stringify({ assigned_to: requestedAssignee }),
+      ],
+    );
+
+    return toMaintainerReport(next);
+  });
+}
+
+export async function markBugAutomationUnavailable(number, reason = "", note = "") {
   await ensureBugSchema();
   const numeric = Number(number);
   if (!Number.isInteger(numeric) || numeric < 1) return null;
@@ -743,36 +879,54 @@ export async function claimBugReport(number, note = "") {
     const row = result.rows[0];
     if (!row) return null;
 
-    let nextStatus = row.status;
-    if (row.status === "reported" || row.status === "received" || row.status === "blocked") {
-      if (row.status === "reported") {
-        await client.query(
-          "INSERT INTO bug_report_events (bug_report_id, status, note) VALUES ($1, 'received', $2)",
-          [row.id, "Relatório recebido pela fila de manutenção."],
-        );
-      }
-      nextStatus = "working";
-      const updated = await client.query(
-        `UPDATE bug_reports
-         SET status = 'working',
-             claimed_at = COALESCE(claimed_at, NOW()),
-             maintainer_note = COALESCE(NULLIF($2, ''), maintainer_note),
-             updated_at = NOW()
-         WHERE number = $1
-         RETURNING *`,
-        [numeric, normalizeText(note, 1000)],
-      );
-      row.status = updated.rows[0].status;
-      row.claimed_at = updated.rows[0].claimed_at;
-      row.maintainer_note = updated.rows[0].maintainer_note;
-      row.updated_at = updated.rows[0].updated_at;
-      await client.query(
-        "INSERT INTO bug_report_events (bug_report_id, status, note) VALUES ($1, 'working', $2)",
-        [row.id, normalizeText(note, 1000, "Atendimento iniciado pelo mantenedor.")],
-      );
+    if (normalizeAssignee(row.assigned_to) === "manual") {
+      throw claimConflict("bug_claim_conflict", "bug is reserved for manual handling");
     }
 
-    return toMaintainerReport({ ...row, status: nextStatus });
+    const settings = await repairSettingsForClient(client);
+    const safeReason = redactText(normalizeText(reason, 4000, "Codex indisponível."));
+    const safeNote = redactText(
+      normalizeText(
+        note,
+        2000,
+        "Codex indisponível. O bug ficou disponível para atendimento manual e será tentado novamente depois.",
+      ),
+    );
+
+    const updated = await client.query(
+      `UPDATE bug_reports
+       SET status = 'blocked',
+           assigned_to = 'unassigned',
+           automation_state = 'unavailable',
+           automation_last_error = $2,
+           automation_retry_at = NOW() + make_interval(mins => $3::int),
+           maintainer_note = $4,
+           updated_at = NOW()
+       WHERE number = $1
+       RETURNING *`,
+      [
+        numeric,
+        safeReason,
+        settings.codex_retry_minutes,
+        safeNote,
+      ],
+    );
+    const next = updated.rows[0];
+
+    await client.query(
+      "INSERT INTO bug_report_events (bug_report_id, status, note, metadata) VALUES ($1, 'blocked', $2, $3::jsonb)",
+      [
+        next.id,
+        safeNote,
+        JSON.stringify({
+          assigned_to: "unassigned",
+          automation_state: "unavailable",
+          automation_retry_at: next.automation_retry_at,
+        }),
+      ],
+    );
+
+    return toMaintainerReport(next);
   });
 }
 
