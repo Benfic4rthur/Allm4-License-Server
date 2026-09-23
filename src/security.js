@@ -137,9 +137,16 @@ export function verifyAdminSecret(candidate) {
 }
 
 export function verifyBugMaintainerSecret(candidate) {
-  const expected = process.env.BUG_MAINTAINER_SECRET?.trim() || getRequiredSecret("ADMIN_SECRET");
   const received = typeof candidate === "string" ? candidate.trim() : "";
-  return received.length > 0 && constantTimeStringEquals(received, expected);
+  if (!received) return false;
+
+  const maintainerSecret = process.env.BUG_MAINTAINER_SECRET?.trim() || "";
+  if (maintainerSecret && constantTimeStringEquals(received, maintainerSecret)) {
+    return true;
+  }
+
+  const adminSecret = getRequiredSecret("ADMIN_SECRET");
+  return constantTimeStringEquals(received, adminSecret);
 }
 
 export function hashBugTrackingToken(value) {

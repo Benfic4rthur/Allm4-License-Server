@@ -8,6 +8,7 @@ import {
   normalizeDeviceId,
   normalizeLicenseKey,
   verifyAdminSecret,
+  verifyBugMaintainerSecret,
 } from "../src/security.js";
 
 process.env.LICENSE_HASH_SECRET =
@@ -77,4 +78,26 @@ test("verifyAdminSecret compares secrets safely", () => {
     true,
   );
   assert.equal(verifyAdminSecret("wrong-secret"), false);
+});
+
+
+test("verifyBugMaintainerSecret accepts the dedicated secret and the admin secret", () => {
+  const previous = process.env.BUG_MAINTAINER_SECRET;
+  process.env.BUG_MAINTAINER_SECRET =
+    "test-maintainer-secret-with-at-least-32-characters";
+
+  assert.equal(
+    verifyBugMaintainerSecret(
+      "test-maintainer-secret-with-at-least-32-characters",
+    ),
+    true,
+  );
+  assert.equal(
+    verifyBugMaintainerSecret("test-admin-secret-with-at-least-32-characters"),
+    true,
+  );
+  assert.equal(verifyBugMaintainerSecret("wrong-secret"), false);
+
+  if (previous === undefined) delete process.env.BUG_MAINTAINER_SECRET;
+  else process.env.BUG_MAINTAINER_SECRET = previous;
 });
