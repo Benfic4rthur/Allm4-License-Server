@@ -199,6 +199,8 @@ function toMaintainerReport(row) {
     pull_request_url: row.pull_request_url || null,
     release_version: row.release_version || null,
     maintainer_note: row.maintainer_note || null,
+    claimed_at: row.claimed_at || null,
+    resolved_at: row.resolved_at || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -432,6 +434,68 @@ export async function getBugReportForClient(number, trackingToken) {
     [row.id],
   );
   return toPublicReport(row, events.rows);
+}
+
+export async function listMaintainerReports(limit = 200) {
+  await ensureBugSchema();
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 200));
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT * FROM bug_reports
+     ORDER BY updated_at DESC, created_at DESC
+     LIMIT $1`,
+    [safeLimit],
+  );
+  return result.rows.map(toMaintainerReport);
+}
+
+export async function getMaintainerBugReport(number) {
+  await ensureBugSchema();
+  const numeric = Number(number);
+  if (!Number.isInteger(numeric) || numeric < 1) return null;
+
+  const pool = getPool();
+  const result = await pool.query(
+    "SELECT * FROM bug_reports WHERE number = $1 LIMIT 1",
+    [numeric],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+
+  const [events, occurrences] = await Promise.all([
+    pool.query(
+      "SELECT status, note, metadata, created_at FROM bug_report_events WHERE bug_report_id = $1 ORDER BY created_at ASC, id ASC",
+      [row.id],
+    ),
+    pool.query(
+      `SELECT app_version, platform, arch, description, error_message, error_context, diagnostics, created_at
+       FROM bug_report_occurrences
+       WHERE bug_report_id = $1
+       ORDER BY created_at DESC, id DESC
+       LIMIT 100`,
+      [row.id],
+    ),
+  ]);
+
+  return {
+    ...toMaintainerReport(row),
+    timeline: events.rows.map((event) => ({
+      status: event.status,
+      note: event.note || null,
+      metadata: event.metadata || {},
+      created_at: event.created_at,
+    })),
+    occurrences: occurrences.rows.map((occurrence) => ({
+      app_version: occurrence.app_version || "",
+      platform: occurrence.platform || "",
+      arch: occurrence.arch || "",
+      description: occurrence.description || "",
+      error_message: occurrence.error_message || "",
+      error_context: occurrence.error_context || "",
+      diagnostics: occurrence.diagnostics || {},
+      created_at: occurrence.created_at,
+    })),
+  };
 }
 
 export async function listMaintainerQueue(limit = 20) {
