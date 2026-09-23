@@ -39,6 +39,8 @@ function mapSale(row) {
     provider_fee_cents: nullableNumber(row.provider_fee_cents),
     net_received_amount_cents: nullableNumber(row.net_received_amount_cents),
     coupon_code: row.coupon_code ?? null,
+    coupon_discount_type: row.coupon_discount_type ?? null,
+    coupon_discount_value: nullableNumber(row.coupon_discount_value),
     paid_at: row.paid_at ?? null,
     created_at: row.created_at,
     license_id: row.license_id ?? null,
@@ -301,7 +303,10 @@ export async function listAdminSales({
        p.discount_amount_cents, p.amount_cents, p.provider_fee_cents,
        p.net_received_amount_cents, p.paid_at, p.created_at,
        p.admin_archived_at, p.admin_financial_resolved_at,
-       c.code AS coupon_code, l.id AS license_id, l.status AS license_status
+       c.code AS coupon_code,
+       c.discount_type AS coupon_discount_type,
+       c.discount_value AS coupon_discount_value,
+       l.id AS license_id, l.status AS license_status
      FROM purchases p
      LEFT JOIN coupons c ON c.id = p.coupon_id
      LEFT JOIN licenses l ON l.purchase_id = p.id

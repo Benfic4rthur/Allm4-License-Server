@@ -8,6 +8,8 @@ import adminDashboardRouter from "./admin-dashboard-routes.js";
 import webhookRouter from "./webhook-routes.js";
 import bugRouter from "./bug-routes.js";
 import freeUsageRouter from "./free-usage-routes.js";
+import productRouter from "./product-routes.js";
+import productAdminRouter from "./product-admin-routes.js";
 
 const app = express();
 
@@ -54,6 +56,8 @@ app.use("/api", adminDashboardRouter);
 app.use("/api", webhookRouter);
 app.use("/api", bugRouter);
 app.use("/api", freeUsageRouter);
+app.use("/api", productRouter);
+app.use("/api", productAdminRouter);
 
 app.use((_req, res) => {
   res.status(404).json({
