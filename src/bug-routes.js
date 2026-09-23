@@ -3,9 +3,12 @@ import {
   claimBugReport,
   createBugReport,
   getBugReportForClient,
+  getBugRepairSettings,
   getMaintainerBugReport,
   listMaintainerQueue,
   listMaintainerReports,
+  markBugAutomationUnavailable,
+  updateBugRepairSettings,
   updateBugReport,
 } from "./bug-service.js";
 import {
@@ -57,6 +60,17 @@ function sendError(res, error) {
 
   if (error?.code === "invalid_request") {
     return res.status(400).json({ ok: false, error: "invalid_request" });
+  }
+
+  if (
+    [
+      "bug_claim_conflict",
+      "bug_claim_window_open",
+      "bug_automation_deferred",
+      "bug_automation_disabled",
+    ].includes(error?.code)
+  ) {
+    return res.status(409).json({ ok: false, error: error.code });
   }
 
   console.error("[Bug API] unexpected error", error);
@@ -114,6 +128,29 @@ router.get("/admin/bugs", requireMaintainer, async (req, res) => {
   }
 });
 
+router.get("/admin/bugs/settings", requireMaintainer, async (_req, res) => {
+  try {
+    const settings = await getBugRepairSettings();
+    return res.status(200).json({ ok: true, settings });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.patch("/admin/bugs/settings", requireMaintainer, async (req, res) => {
+  try {
+    const body = getObjectBody(req);
+    const settings = await updateBugRepairSettings({
+      manualClaimMinutes: body.manual_claim_minutes,
+      codexRetryMinutes: body.codex_retry_minutes,
+      autoAssignCodex: body.auto_assign_codex,
+    });
+    return res.status(200).json({ ok: true, settings });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 router.get("/admin/bugs/queue", requireMaintainer, async (req, res) => {
   try {
     const reports = await listMaintainerQueue(req.query.limit);
@@ -139,7 +176,25 @@ router.post("/admin/bugs/:bugId/claim", requireMaintainer, async (req, res) => {
   try {
     const number = parsePublicNumber(req.params.bugId);
     if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
-    const report = await claimBugReport(number, getObjectBody(req).note);
+    const body = getObjectBody(req);
+    const report = await claimBugReport(number, body.note, body.assignee);
+    if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    return res.status(200).json({ ok: true, bug: report });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post("/admin/bugs/:bugId/automation-unavailable", requireMaintainer, async (req, res) => {
+  try {
+    const number = parsePublicNumber(req.params.bugId);
+    if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    const body = getObjectBody(req);
+    const report = await markBugAutomationUnavailable(
+      number,
+      body.reason,
+      body.note,
+    );
     if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
     return res.status(200).json({ ok: true, bug: report });
   } catch (error) {
