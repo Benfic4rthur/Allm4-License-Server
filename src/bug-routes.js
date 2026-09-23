@@ -3,7 +3,9 @@ import {
   claimBugReport,
   createBugReport,
   getBugReportForClient,
+  getMaintainerBugReport,
   listMaintainerQueue,
+  listMaintainerReports,
   updateBugReport,
 } from "./bug-service.js";
 import {
@@ -103,10 +105,31 @@ router.get("/bugs/:bugId", async (req, res) => {
   }
 });
 
+router.get("/admin/bugs", requireMaintainer, async (req, res) => {
+  try {
+    const reports = await listMaintainerReports(req.query.limit);
+    return res.status(200).json({ ok: true, bugs: reports });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
 router.get("/admin/bugs/queue", requireMaintainer, async (req, res) => {
   try {
     const reports = await listMaintainerQueue(req.query.limit);
     return res.status(200).json({ ok: true, bugs: reports });
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.get("/admin/bugs/:bugId", requireMaintainer, async (req, res) => {
+  try {
+    const number = parsePublicNumber(req.params.bugId);
+    if (!number) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    const report = await getMaintainerBugReport(number);
+    if (!report) return res.status(404).json({ ok: false, error: "bug_not_found" });
+    return res.status(200).json({ ok: true, bug: report });
   } catch (error) {
     return sendError(res, error);
   }
