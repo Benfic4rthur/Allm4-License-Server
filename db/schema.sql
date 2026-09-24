@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS coupons (
   discount_type TEXT NOT NULL CHECK (discount_type IN ('percent', 'fixed')),
   discount_value INTEGER NOT NULL CHECK (discount_value > 0),
   active BOOLEAN NOT NULL DEFAULT TRUE,
+  published_on_site BOOLEAN NOT NULL DEFAULT FALSE,
   starts_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ,
   max_uses INTEGER CHECK (max_uses IS NULL OR max_uses > 0),

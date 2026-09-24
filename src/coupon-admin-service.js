@@ -71,6 +71,7 @@ function publicCoupon(row) {
     discount_type: row.discount_type,
     discount_value: Number(row.discount_value),
     active: row.active === true,
+    published_on_site: row.published_on_site === true,
     starts_at: row.starts_at ?? null,
     expires_at: row.expires_at ?? null,
     max_uses: row.max_uses === null ? null : Number(row.max_uses),
@@ -92,6 +93,7 @@ function couponSelectSql() {
       c.discount_type,
       c.discount_value,
       c.active,
+      c.published_on_site,
       c.starts_at,
       c.expires_at,
       c.max_uses,
@@ -113,6 +115,7 @@ function couponGroupSql() {
       c.discount_type,
       c.discount_value,
       c.active,
+      c.published_on_site,
       c.starts_at,
       c.expires_at,
       c.max_uses,
@@ -144,6 +147,10 @@ export function normalizeCouponCreateInput(input = {}) {
   }
 
   const active = normalizeBoolean(input.active, "active");
+  const publishedOnSite = normalizeBoolean(
+    input.published_on_site,
+    "published_on_site",
+  );
   const startsAt = normalizeOptionalTimestamp(input.starts_at, "starts_at");
   const expiresAt = normalizeOptionalTimestamp(input.expires_at, "expires_at");
   const maxUses = normalizeNullablePositiveInteger(input.max_uses, "max_uses");
@@ -157,6 +164,7 @@ export function normalizeCouponCreateInput(input = {}) {
     discount_type: discountType,
     discount_value: discountValue,
     active: active.supplied ? active.value : true,
+    published_on_site: publishedOnSite.supplied ? publishedOnSite.value : false,
     starts_at: startsAt.supplied ? startsAt.value : null,
     expires_at: expiresAt.supplied ? expiresAt.value : null,
     max_uses: maxUses.supplied ? maxUses.value : null,
@@ -169,6 +177,10 @@ export function normalizeCouponCreateInput(input = {}) {
 
 export function normalizeCouponUpdateInput(input = {}) {
   const active = normalizeBoolean(input.active, "active");
+  const publishedOnSite = normalizeBoolean(
+    input.published_on_site,
+    "published_on_site",
+  );
   const startsAt = normalizeOptionalTimestamp(input.starts_at, "starts_at");
   const expiresAt = normalizeOptionalTimestamp(input.expires_at, "expires_at");
   const maxUses = normalizeNullablePositiveInteger(input.max_uses, "max_uses");
@@ -179,6 +191,7 @@ export function normalizeCouponUpdateInput(input = {}) {
 
   const supplied = [
     active.supplied,
+    publishedOnSite.supplied,
     startsAt.supplied,
     expiresAt.supplied,
     maxUses.supplied,
@@ -193,6 +206,9 @@ export function normalizeCouponUpdateInput(input = {}) {
 
   return {
     ...(active.supplied ? { active: active.value } : {}),
+    ...(publishedOnSite.supplied
+      ? { published_on_site: publishedOnSite.value }
+      : {}),
     ...(startsAt.supplied ? { starts_at: startsAt.value } : {}),
     ...(expiresAt.supplied ? { expires_at: expiresAt.value } : {}),
     ...(maxUses.supplied ? { max_uses: maxUses.value } : {}),
@@ -224,18 +240,20 @@ export async function createAdminCoupon(input) {
            discount_type,
            discount_value,
            active,
+           published_on_site,
            starts_at,
            expires_at,
            max_uses,
            max_uses_per_email
          )
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id`,
         [
           normalized.code,
           normalized.discount_type,
           normalized.discount_value,
           normalized.active,
+          normalized.published_on_site,
           normalized.starts_at,
           normalized.expires_at,
           normalized.max_uses,
