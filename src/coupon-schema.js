@@ -2,6 +2,8 @@ import { withTransaction } from "./db.js";
 
 const COUPON_SCHEMA_MIGRATION_KEY = "coupon-schema-v1";
 const COUPON_SCHEMA_LOCK_KEY = "allm4-coupon-schema-v1";
+const COUPON_SITE_PUBLISH_MIGRATION_KEY = "coupon-site-publish-v1";
+const COUPON_SITE_PUBLISH_LOCK_KEY = "allm4-coupon-site-publish-v1";
 
 let couponStorageReady = null;
 
@@ -174,11 +176,56 @@ export async function runCouponSchemaMigration(client) {
   return { applied: true, key: COUPON_SCHEMA_MIGRATION_KEY };
 }
 
+export async function runCouponSitePublishMigration(client) {
+  await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+    COUPON_SITE_PUBLISH_LOCK_KEY,
+  ]);
+
+  await client.query(
+    `CREATE TABLE IF NOT EXISTS coupon_schema_migrations (
+       key TEXT PRIMARY KEY,
+       applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+     )`,
+  );
+
+  const alreadyApplied = await client.query(
+    `SELECT key
+     FROM coupon_schema_migrations
+     WHERE key = $1`,
+    [COUPON_SITE_PUBLISH_MIGRATION_KEY],
+  );
+
+  if (alreadyApplied.rows.length > 0) {
+    return { applied: false, key: COUPON_SITE_PUBLISH_MIGRATION_KEY };
+  }
+
+  await client.query(
+    `ALTER TABLE coupons
+       ADD COLUMN IF NOT EXISTS published_on_site BOOLEAN NOT NULL DEFAULT FALSE`,
+  );
+
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS idx_coupons_published_on_site
+     ON coupons(updated_at DESC)
+     WHERE published_on_site = TRUE`,
+  );
+
+  await client.query(
+    `INSERT INTO coupon_schema_migrations (key)
+     VALUES ($1)
+     ON CONFLICT (key) DO NOTHING`,
+    [COUPON_SITE_PUBLISH_MIGRATION_KEY],
+  );
+
+  return { applied: true, key: COUPON_SITE_PUBLISH_MIGRATION_KEY };
+}
+
 export async function ensureCouponStorage() {
   if (!couponStorageReady) {
-    couponStorageReady = withTransaction((client) =>
-      runCouponSchemaMigration(client),
-    ).catch((error) => {
+    couponStorageReady = withTransaction(async (client) => {
+      await runCouponSchemaMigration(client);
+      await runCouponSitePublishMigration(client);
+    }).catch((error) => {
       couponStorageReady = null;
       throw error;
     });
