@@ -18,6 +18,7 @@ test("coupon admin create defaults to active and one use per email", () => {
     discount_type: "percent",
     discount_value: 20,
     active: true,
+    published_on_site: false,
     starts_at: null,
     expires_at: null,
     max_uses: null,
@@ -79,6 +80,7 @@ test("coupon admin validates expiration after start", () => {
 test("coupon admin update only exposes operational fields", () => {
   const result = normalizeCouponUpdateInput({
     active: false,
+    published_on_site: true,
     expires_at: null,
     max_uses: 50,
     max_uses_per_email: 1,
@@ -88,6 +90,7 @@ test("coupon admin update only exposes operational fields", () => {
 
   assert.deepEqual(result, {
     active: false,
+    published_on_site: true,
     expires_at: null,
     max_uses: 50,
     max_uses_per_email: 1,
@@ -100,6 +103,31 @@ test("coupon admin update rejects empty patch", () => {
     (error) => {
       assert.ok(error instanceof CouponAdminValidationError);
       assert.equal(error.fields.body, "no_supported_fields");
+      return true;
+    },
+  );
+});
+
+test("coupon admin accepts publishing a coupon to the site on creation", () => {
+  const result = normalizeCouponCreateInput({
+    code: "SITE20",
+    discount_type: "percent",
+    discount_value: 20,
+    published_on_site: true,
+  });
+
+  assert.equal(result.published_on_site, true);
+});
+
+test("coupon admin rejects invalid site publication flags", () => {
+  assert.throws(
+    () =>
+      normalizeCouponUpdateInput({
+        published_on_site: "yes",
+      }),
+    (error) => {
+      assert.ok(error instanceof CouponAdminValidationError);
+      assert.equal(error.fields.published_on_site, "must_be_boolean");
       return true;
     },
   );
